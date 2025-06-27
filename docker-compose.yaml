@@ -1,0 +1,20 @@
+services:
+  twitch-streamer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: twitch-streamer
+    container_name: twitch-streamer
+    restart: unless-stopped
+    devices:
+      - /dev/dri:/dev/dri
+    volumes:
+      - ./videos:/videos
+      - .:/data
+    environment:
+      TWITCH_STREAM_KEY: "put_your_twitch_stream_key_here"
+      VIDEO_DIR: "/videos"
+      TZ: Europe/Tallinn
+    stdin_open: true
+    tty: true
+    
