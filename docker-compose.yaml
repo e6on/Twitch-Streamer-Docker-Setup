@@ -1,0 +1,25 @@
+services:
+  twitch-streamer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: twitch-streamer
+    container_name: twitch-streamer
+    restart: always
+    devices:
+      - /dev/dri/renderD128:/dev/dri/renderD128
+      - /dev/dri/card0:/dev/dri/card0
+    volumes:
+      - ./videos:/videos
+      - ./data:/data
+    environment:
+      # TWITCH_STREAM_KEY is loaded automatically from the .env file.
+      # This line tells compose to pass the variable from the host environment into the container.
+      - TWITCH_STREAM_KEY
+      - VIDEO_DIR=/videos
+      - TZ=Europe/Tallinn
+    # Grant the container user access to the host's render and video groups.
+    # Replace the GIDs below with the output from the 'getent group' commands on your host.
+    group_add:
+      - "105" # GID for the 'render' group
+      - "44"  # GID for the 'video' group
