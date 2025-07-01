@@ -75,6 +75,26 @@ check_env_vars() {
         log ERROR "Required environment variable TWITCH_STREAM_KEY is not set."
         exit 1
     fi
+    if [[ -z "${STREAM_RESOLUTION:-}" ]]; then
+        log ERROR "Required environment variable STREAM_RESOLUTION is not set."
+        exit 1
+    fi
+    if [[ -z "${STREAM_FRAMERATE:-}" ]]; then
+        log ERROR "Required environment variable STREAM_FRAMERATE is not set."
+        exit 1
+    fi
+    if [[ -z "${VIDEO_BITRATE:-}" ]]; then
+        log ERROR "Required environment variable VIDEO_BITRATE is not set."
+        exit 1
+    fi
+    if [[ -z "${AUDIO_BITRATE:-}" ]]; then
+        log ERROR "Required environment variable AUDIO_BITRATE is not set."
+        exit 1
+    fi
+    if [[ -z "${VIDEO_FILE_TYPES:-}" ]]; then
+        log ERROR "Required environment variable VIDEO_FILE_TYPES is not set."
+        exit 1
+    fi
 }
 
 # Generate file list
