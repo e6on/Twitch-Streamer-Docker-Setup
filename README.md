@@ -79,7 +79,7 @@ TWITCH_STREAM_KEY=your_stream_key_here
 
 ### 5. Add Your Videos
 
-Place all the video files you want to stream into the `videos/` directory. The script will automatically find all `.mp4`, `.mkv`, and `.mpg` files. The playlist is automatically regenerated and updated whenever you add, remove, or move videos in this directory.
+Place all the video files you want to stream into the `videos/` directory. By default, the script finds all `.mp4`, `.mkv`, and `.mpg` files. You can customize the supported file types via the `VIDEO_FILE_TYPES` environment variable (see the Configuration section). The playlist is automatically regenerated and updated whenever you add, remove, or move videos in this directory.
 
 ## Usage
 
@@ -117,6 +117,15 @@ Uncomment and modify these variables to change the output stream quality. The de
 # - STREAM_FRAMERATE=30
 # - VIDEO_BITRATE=3000k # Recommended: 3000k for 720p30, 4500k for 720p60
 # - AUDIO_BITRATE=160k # Recommended: 128k or 160k for good quality
+```
+### File Types
+
+You can control which video file types are included in the stream by setting the `VIDEO_FILE_TYPES` environment variable in `docker-compose.yaml`. Provide a space-separated list of extensions.
+
+```yaml
+# `docker-compose.yaml
+# --- Optional Stream Quality Settings ---
+# - VIDEO_FILE_TYPES="mp4 mkv avi mov" # Space-separated list of file extensions
 ```
 
 ### Twitch Ingest Server

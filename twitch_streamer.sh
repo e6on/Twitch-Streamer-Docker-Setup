@@ -18,6 +18,7 @@ readonly STREAM_RESOLUTION=${STREAM_RESOLUTION:-"960x540"}
 readonly STREAM_FRAMERATE=${STREAM_FRAMERATE:-"25"}
 readonly VIDEO_BITRATE=${VIDEO_BITRATE:-"1800k"}
 readonly AUDIO_BITRATE=${AUDIO_BITRATE:-"64k"}
+readonly VIDEO_FILE_TYPES=${VIDEO_FILE_TYPES:-"mp4 mkv mpg"} # Space-separated list of file extensions.
 readonly GOP_SIZE=$((STREAM_FRAMERATE * 2)) # Keyframe every 2 seconds, as recommended by Twitch.
 readonly TWITCH_INGEST_URL=${TWITCH_INGEST_URL:-"rtmp://live.twitch.tv/app/"}
 
@@ -78,10 +79,25 @@ check_env_vars() {
 
 # Generate file list
 generate_filelist() {
-    log INFO "Generating file list from ${VIDEO_DIR}..."
+    log INFO "Generating file list from ${VIDEO_DIR} for types: ${VIDEO_FILE_TYPES}..."
+    local -a find_args
+    find_args=("${VIDEO_DIR}" -type f)
+
+    # Dynamically build the -iname parts of the find command.
+    local first=true
+    for ext in ${VIDEO_FILE_TYPES}; do
+        if [ "$first" = true ]; then
+            find_args+=(\( -iname "*.${ext}")
+            first=false
+        else
+            find_args+=(-o -iname "*.${ext}")
+        fi
+    done
+    find_args+=(\))
+
     # Use find -print0 and read -d '' to robustly handle filenames with special characters.
     {
-        find "${VIDEO_DIR}" -type f \( -iname '*.mp4' -o -iname '*.mkv' -o -iname '*.mpg' \) -print0 |
+        find "${find_args[@]}" -print0 |
         sort -z |
         while IFS= read -r -d '' file; do
             echo "file '$file'"

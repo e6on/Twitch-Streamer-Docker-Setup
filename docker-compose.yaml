@@ -23,6 +23,7 @@ services:
       # - STREAM_FRAMERATE=30
       # - VIDEO_BITRATE=3000k
       # - AUDIO_BITRATE=160k
+      - VIDEO_FILE_TYPES="mp4 mkv mpg mov" # Space-separated list of file extensions
       # --- Optional Ingest Server ---
       # For best results, choose a server close to you from https://help.twitch.tv/s/twitch-ingest-recommendation
       - TWITCH_INGEST_URL=rtmp://hel03.contribute.live-video.net/app/ # Europe: Finland, Helsinki
