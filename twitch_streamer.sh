@@ -13,6 +13,14 @@ readonly NC='\033[0m' # No Color
 # Time to wait after a file change before restarting, to batch multiple changes.
 readonly RESTART_DEBOUNCE_SECONDS=5
 
+# --- Stream Configuration (can be overridden by environment variables) ---
+readonly STREAM_RESOLUTION=${STREAM_RESOLUTION:-"960x540"}
+readonly STREAM_FRAMERATE=${STREAM_FRAMERATE:-"25"}
+readonly VIDEO_BITRATE=${VIDEO_BITRATE:-"1800k"}
+readonly AUDIO_BITRATE=${AUDIO_BITRATE:-"64k"}
+readonly GOP_SIZE=$((STREAM_FRAMERATE * 2)) # Keyframe every 2 seconds, as recommended by Twitch.
+readonly TWITCH_INGEST_URL=${TWITCH_INGEST_URL:-"rtmp://live.twitch.tv/app/"}
+
 # --- Global Variables ---
 FILE_LIST=""
 FFMPEG_PID=""
@@ -117,19 +125,19 @@ start_streaming() {
         -map 0:a:0            # Map first audio stream
         -flags +global_header # Needed for some formats
         -c:a aac              # Audio codec
-        -b:a 64k              # Audio bitrate
+        -b:a "${AUDIO_BITRATE}" # Audio bitrate
         -ar 44100             # Audio sample rate
-        -vf 'format=nv12,hwupload,scale_vaapi=w=960:h=540' # Video filter
+        -vf "format=nv12,hwupload,scale_vaapi=w=${STREAM_RESOLUTION%x*}:h=${STREAM_RESOLUTION#*x}" # Video filter
         -c:v h264_vaapi       # Video codec
-        -r 25                 # Video framerate
-        -b:v 1800k            # Video bitrate
-        -minrate 1800k        # Min video bitrate
-        -maxrate 1800k        # Max video bitrate
-        -bufsize 1800k        # VBV buffer size
-        -g 50                 # GOP size
-        -keyint_min 50        # Min keyframe interval
+        -r "${STREAM_FRAMERATE}"  # Video framerate
+        -b:v "${VIDEO_BITRATE}"   # Video bitrate
+        -minrate "${VIDEO_BITRATE}" # Min video bitrate
+        -maxrate "${VIDEO_BITRATE}" # Max video bitrate
+        -bufsize "${VIDEO_BITRATE}" # VBV buffer size
+        -g "${GOP_SIZE}"          # GOP size (keyframe interval in frames)
+        -keyint_min "${GOP_SIZE}" # Min keyframe interval
         -f flv                # Output format
-        "rtmp://live.twitch.tv/app/${TWITCH_STREAM_KEY}"
+        "${TWITCH_INGEST_URL}${TWITCH_STREAM_KEY}"
     )
 
     # Run ffmpeg in the background.

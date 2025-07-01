@@ -17,6 +17,15 @@ services:
       # This line tells compose to pass the variable from the host environment into the container.
       - TWITCH_STREAM_KEY
       - VIDEO_DIR=/videos
+      # --- Optional Stream Quality Settings ---
+      # Uncomment and adjust these to change stream quality. Defaults are for a 960x540 25fps stream.
+      # - STREAM_RESOLUTION=1280x720
+      # - STREAM_FRAMERATE=30
+      # - VIDEO_BITRATE=3000k
+      # - AUDIO_BITRATE=160k
+      # --- Optional Ingest Server ---
+      # For best results, choose a server close to you from https://help.twitch.tv/s/twitch-ingest-recommendation
+      - TWITCH_INGEST_URL=rtmp://hel03.contribute.live-video.net/app/ # Europe: Finland, Helsinki
       - TZ=Europe/Tallinn
     # Grant the container user access to the host's render and video groups.
     # Replace the GIDs below with the output from the 'getent group' commands on your host.
