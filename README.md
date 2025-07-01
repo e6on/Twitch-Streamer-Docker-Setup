@@ -16,7 +16,7 @@ A simple, efficient, and Docker-based solution for streaming a playlist of video
 Before you begin, ensure you have the following installed and configured on your host system:
 
 -   Docker & Docker Compose
--   [FFmpeg - ffmpeg-6.1.2-linux-amd64.tar.xz](https://github.com/AkashiSN/ffmpeg-docker/releases) pre-built binary files.
+-   Download [FFmpeg - ffmpeg-6.1.2-linux-amd64.tar.xz](https://github.com/AkashiSN/ffmpeg-docker/releases) pre-built binary files.
 -   A modern Intel CPU with Quick Sync Video support.
 -   **Intel VA-API Drivers:**
     -   For modern GPUs (Broadwell and newer), install `intel-media-driver`.
@@ -103,7 +103,7 @@ docker-compose down
 
 ## Configuration
 
-You can customize the stream's quality and destination by editing the environment section in the docker-compose.yaml file.
+You can customize the stream's quality and destination by editing the environment section in the `docker-compose.yaml` file.
 
 ### Stream Quality
 
