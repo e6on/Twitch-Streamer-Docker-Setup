@@ -11,6 +11,8 @@ A simple, efficient, and Docker-based solution for streaming a playlist of video
 -   **Highly Customizable:** Easily change stream resolution, framerate, bitrates, and ingest server via environment variables.
 -   **Persistent Playlist:** The generated playlist is stored in the `./data` volume for easy inspection.
 
+You can use ready made Docker image from here https://hub.docker.com/r/e6on/twitch-streamer or make your own.
+
 ## Prerequisites
 
 Before you begin, ensure you have the following installed and configured on your host system:

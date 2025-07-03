@@ -1,9 +1,13 @@
 services:
   twitch-streamer:
+    # --- To build the image locally (default) ---
     build:
       context: .
       dockerfile: Dockerfile
     image: twitch-streamer
+    # --- To use an image from Docker Hub ---
+    # Comment out the 'build' section above and uncomment the line below.
+    # image: e6on/twitch-streamer:latest
     container_name: twitch-streamer
     restart: always
     devices:

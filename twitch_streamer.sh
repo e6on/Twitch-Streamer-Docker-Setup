@@ -100,12 +100,16 @@ check_env_vars() {
 # Generate file list
 generate_filelist() {
     log INFO "Generating file list from ${VIDEO_DIR} for types: ${VIDEO_FILE_TYPES}..."
+    # Sanitize VIDEO_FILE_TYPES to handle values passed with quotes from docker-compose, e.g., "mp4 mkv mov"
+    local sanitized_file_types="${VIDEO_FILE_TYPES%\"}" # Remove trailing quote
+    sanitized_file_types="${sanitized_file_types#\"}"   # Remove leading quote
+
     local -a find_args
     find_args=("${VIDEO_DIR}" -type f)
 
     # Dynamically build the -iname parts of the find command.
     local first=true
-    for ext in ${VIDEO_FILE_TYPES}; do
+    for ext in ${sanitized_file_types}; do
         if [ "$first" = true ]; then
             find_args+=(\( -iname "*.${ext}")
             first=false
