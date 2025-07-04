@@ -220,6 +220,8 @@ start_streaming() {
     # Output options
     ffmpeg_opts+=(
         -flags +global_header
+        # Force constant frame rate, which can help prevent sync issues and looping failures.
+        -vsync cfr
         # Audio settings
         -c:a aac
         -b:a "${AUDIO_BITRATE}"
