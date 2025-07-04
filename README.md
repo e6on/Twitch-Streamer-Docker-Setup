@@ -10,6 +10,7 @@ A simple, efficient, and Docker-based solution for streaming a playlist of video
 -   **Dockerized:** Easy to set up and run on any Linux system with Docker and a supported Intel GPU.
 -   **Highly Customizable:** Easily change stream resolution, framerate, bitrates, and ingest server via environment variables.
 -   **Persistent Playlist:** The generated playlist is stored in the `./data` volume for easy inspection.
+-   **Optional Background Music:** Replace the original video audio with a separate, continuously looping playlist of your own music.
 
 You can use ready made Docker image from here https://hub.docker.com/r/e6on/twitch-streamer or make your own.
 
@@ -83,6 +84,14 @@ TWITCH_STREAM_KEY=your_stream_key_here
 
 Place all the video files you want to stream into the `videos/` directory. By default, the script finds all `.mp4`, `.mkv`, and `.mpg` files. You can customize the supported file types via the `VIDEO_FILE_TYPES` environment variable (see the Configuration section). The playlist is automatically regenerated and updated whenever you add, remove, or move videos in this directory.
 
+### 6. (Optional) Add Background Music
+
+If you want to replace the original audio from your videos with a custom background music track, you can use the music feature.
+
+1.  Create a `music/` directory in the project root.
+2.  Place your audio files (e.g., `.mp3`, `.flac`, `.wav`) into the `music/` directory. The music will loop continuously.
+3.  Enable the feature in `docker-compose.yaml` by uncommenting the music-related environment variables.
+
 ## Usage
 
 Once you have completed the setup, you can start the stream with a single command:
@@ -115,10 +124,10 @@ Uncomment and modify these variables to change the output stream quality. The de
 # docker-compose.yaml
 # --- Optional Stream Quality Settings ---
 # Uncomment and adjust these to change stream quality.
-# - STREAM_RESOLUTION=1280x720 # e.g., 720p
-# - STREAM_FRAMERATE=30
-# - VIDEO_BITRATE=3000k # Recommended: 3000k for 720p30, 4500k for 720p60
-# - AUDIO_BITRATE=160k # Recommended: 128k or 160k for good quality
+- STREAM_RESOLUTION=1280x720 # e.g., 720p
+- STREAM_FRAMERATE=30
+- VIDEO_BITRATE=3000k # Recommended: 3000k for 720p30, 4500k for 720p60
+- AUDIO_BITRATE=160k # Recommended: 128k or 160k for good quality
 ```
 ### File Types
 
@@ -127,8 +136,24 @@ You can control which video file types are included in the stream by setting the
 ```yaml
 # `docker-compose.yaml
 # --- Optional Stream Quality Settings ---
-# - VIDEO_FILE_TYPES="mp4 mkv avi mov" # Space-separated list of file extensions
+- VIDEO_FILE_TYPES="mp4 mkv avi mov" # Space-separated list of file extensions
 ```
+
+### Background Music
+
+To enable the background music feature, uncomment the following lines in `docker-compose.yaml`. This will instruct the script to find all audio files in the `./music` directory and loop them over your video stream, replacing the original audio.
+
+```yaml
+# docker-compose.yaml
+# --- Optional Background Music ---
+# Uncomment to enable a separate, continuously looping music track over your videos.
+- ENABLE_MUSIC=true
+- MUSIC_DIR=/music
+- MUSIC_FILE_TYPES="mp3 flac wav ogg"
+```
+
+You can customize the MUSIC_FILE_TYPES to include other audio formats.
+
 
 ### Twitch Ingest Server
 

@@ -18,12 +18,19 @@ readonly STREAM_RESOLUTION=${STREAM_RESOLUTION:-"960x540"}
 readonly STREAM_FRAMERATE=${STREAM_FRAMERATE:-"25"}
 readonly VIDEO_BITRATE=${VIDEO_BITRATE:-"1800k"}
 readonly AUDIO_BITRATE=${AUDIO_BITRATE:-"64k"}
-readonly VIDEO_FILE_TYPES=${VIDEO_FILE_TYPES:-"mp4 mkv mpg"} # Space-separated list of file extensions.
 readonly GOP_SIZE=$((STREAM_FRAMERATE * 2)) # Keyframe every 2 seconds, as recommended by Twitch.
 readonly TWITCH_INGEST_URL=${TWITCH_INGEST_URL:-"rtmp://live.twitch.tv/app/"}
 
+# --- File Type Configuration ---
+readonly VIDEO_FILE_TYPES=${VIDEO_FILE_TYPES:-"mp4 mkv mpg mov"} # Space-separated list of video file extensions.
+readonly MUSIC_FILE_TYPES=${MUSIC_FILE_TYPES:-"mp3 flac wav ogg"} # Space-separated list of music file extensions.
+
+# --- Feature Flags ---
+readonly ENABLE_MUSIC=${ENABLE_MUSIC:-"false"}
+
 # --- Global Variables ---
-FILE_LIST=""
+VIDEO_FILE_LIST=""
+MUSIC_FILE_LIST=""
 FFMPEG_PID=""
 
 # Logging function
@@ -95,39 +102,77 @@ check_env_vars() {
         log ERROR "Required environment variable VIDEO_FILE_TYPES is not set."
         exit 1
     fi
+
+    if [[ "${ENABLE_MUSIC}" == "true" ]]; then
+        log INFO "Music is enabled. Checking music-related variables..."
+        if [[ -z "${MUSIC_DIR:-}" ]]; then
+            log ERROR "ENABLE_MUSIC is true, but MUSIC_DIR is not set."
+            exit 1
+        fi
+        if [[ ! -d "${MUSIC_DIR}" ]]; then
+            log ERROR "MUSIC_DIR (${MUSIC_DIR}) is not a valid directory."
+            exit 1
+        fi
+    fi
 }
 
-# Generate file list
-generate_filelist() {
-    log INFO "Generating file list from ${VIDEO_DIR} for types: ${VIDEO_FILE_TYPES}..."
-    # Sanitize VIDEO_FILE_TYPES to handle values passed with quotes from docker-compose, e.g., "mp4 mkv mov"
-    local sanitized_file_types="${VIDEO_FILE_TYPES%\"}" # Remove trailing quote
+# Generic function to generate a playlist file from a directory of media files.
+# Arguments:
+#   $1: The directory to scan for files (e.g., /videos).
+#   $2: A space-separated string of file extensions (e.g., "mp4 mkv").
+#   $3: The path to the output playlist file (e.g., /data/videolist.txt).
+#   $4: The type of media for logging purposes (e.g., "Video").
+generate_playlist() {
+    local source_dir="$1"
+    local file_types="$2"
+    local output_file="$3"
+    local media_type="$4"
+
+    log INFO "Generating ${media_type} list from ${source_dir} for types: ${file_types}..."
+    # Sanitize file_types to handle values passed with quotes from docker-compose, e.g., "mp4 mkv mov"
+    local sanitized_file_types="${file_types%\"}" # Remove trailing quote
     sanitized_file_types="${sanitized_file_types#\"}"   # Remove leading quote
 
+    if [[ -z "${sanitized_file_types}" ]]; then
+        log WARNING "No file types specified for ${media_type}. Playlist will be empty."
+        # Create an empty file and return to prevent find from listing all files.
+        > "${output_file}"
+        return
+    fi
+
     local -a find_args
-    find_args=("${VIDEO_DIR}" -type f)
+    find_args=("${source_dir}" -type f)
 
     # Dynamically build the -iname parts of the find command.
     local first=true
     for ext in ${sanitized_file_types}; do
         if [ "$first" = true ]; then
+            # Start the expression group
             find_args+=(\( -iname "*.${ext}")
             first=false
         else
+            # Append other extensions with an "or" operator
             find_args+=(-o -iname "*.${ext}")
         fi
     done
-    find_args+=(\))
+    find_args+=(\)) # Close the expression group
 
     # Use find -print0 and read -d '' to robustly handle filenames with special characters.
-    {
-        find "${find_args[@]}" -print0 |
-        sort -z |
-        while IFS= read -r -d '' file; do
-            echo "file '$file'"
-        done
-    } > "${FILE_LIST}"
-    log INFO "File list generated at ${FILE_LIST}"
+    { find "${find_args[@]}" -print0 | sort -z | while IFS= read -r -d '' file; do echo "file '$file'"; done; } > "${output_file}"
+    log INFO "${media_type} file list generated at ${output_file}"
+}
+
+# Wrapper function to generate the video playlist.
+generate_videolist() {
+    generate_playlist "${VIDEO_DIR}" "${VIDEO_FILE_TYPES}" "${VIDEO_FILE_LIST}" "Video"
+}
+
+# Wrapper function to generate the music playlist.
+generate_musiclist() {
+    if [[ "${ENABLE_MUSIC}" != "true" ]]; then
+        return
+    fi
+    generate_playlist "${MUSIC_DIR}" "${MUSIC_FILE_TYPES}" "${MUSIC_FILE_LIST}" "Music"
 }
 
 # Kill FFmpeg process safely
@@ -143,42 +188,58 @@ kill_ffmpeg() {
 
 # Start FFmpeg streaming
 start_streaming() {
-    if [[ ! -s "${FILE_LIST}" ]]; then
+    if [[ ! -s "${VIDEO_FILE_LIST}" ]]; then
         log WARNING "No video files found in ${VIDEO_DIR}. Waiting for files to be added."
         return
     fi
 
-    log INFO "Starting FFmpeg stream..."
-    # Use an array for ffmpeg arguments for clarity and safety.
     local -a ffmpeg_opts
-    ffmpeg_opts=(
-        -re                   # Read input at native frame rate
-        -stream_loop -1       # Loop playlist indefinitely
-        -nostdin              # Disable interaction on stdin
-        -hwaccel vaapi        # Use VA-API for hardware acceleration
-        -vaapi_device /dev/dri/renderD128
-        -fflags +genpts       # Generate PTS
-        -f concat             # Use concat demuxer
-        -safe 0               # Allow unsafe file paths in the list
-        -i "${FILE_LIST}"     # Input file list
-        -map 0:v:0            # Map first video stream
-        -map 0:a:0            # Map first audio stream
-        -flags +global_header # Needed for some formats
-        -c:a aac              # Audio codec
-        -b:a "${AUDIO_BITRATE}" # Audio bitrate
-        -ar 44100             # Audio sample rate
-        -vf "format=nv12,hwupload,scale_vaapi=w=${STREAM_RESOLUTION%x*}:h=${STREAM_RESOLUTION#*x}" # Video filter
-        -c:v h264_vaapi       # Video codec
-        -r "${STREAM_FRAMERATE}"  # Video framerate
-        -b:v "${VIDEO_BITRATE}"   # Video bitrate
-        -minrate "${VIDEO_BITRATE}" # Min video bitrate
-        -maxrate "${VIDEO_BITRATE}" # Max video bitrate
-        -bufsize "${VIDEO_BITRATE}" # VBV buffer size
-        -g "${GOP_SIZE}"          # GOP size (keyframe interval in frames)
-        -keyint_min "${GOP_SIZE}" # Min keyframe interval
-        -f flv                # Output format
+    local music_enabled_and_found=false
+    if [[ "${ENABLE_MUSIC}" == "true" ]] && [[ -s "${MUSIC_FILE_LIST}" ]]; then
+        music_enabled_and_found=true
+        log INFO "Music is enabled and music files were found. Replacing video audio with music playlist."
+    fi
+
+    # Common options
+    ffmpeg_opts+=(-re -nostdin -hwaccel vaapi -vaapi_device /dev/dri/renderD128 -fflags +genpts)
+
+    # Input options
+    ffmpeg_opts+=(-stream_loop -1 -f concat -safe 0 -i "${VIDEO_FILE_LIST}") # Video input
+    if [[ "$music_enabled_and_found" == "true" ]]; then
+        ffmpeg_opts+=(-stream_loop -1 -f concat -safe 0 -i "${MUSIC_FILE_LIST}") # Music input
+    fi
+
+    # Mapping options
+    ffmpeg_opts+=(-map 0:v:0) # Always map video from the first input
+    if [[ "$music_enabled_and_found" == "true" ]]; then
+        ffmpeg_opts+=(-map 1:a:0) # Map audio from the second (music) input
+    else
+        ffmpeg_opts+=(-map 0:a:0) # Map audio from the first (video) input
+    fi
+
+    # Output options
+    ffmpeg_opts+=(
+        -flags +global_header
+        # Audio settings
+        -c:a aac
+        -b:a "${AUDIO_BITRATE}"
+        -ar 44100
+        # Video settings
+        -vf "format=nv12,hwupload,scale_vaapi=w=${STREAM_RESOLUTION%x*}:h=${STREAM_RESOLUTION#*x}"
+        -c:v h264_vaapi
+        -r "${STREAM_FRAMERATE}"
+        -b:v "${VIDEO_BITRATE}"
+        -minrate "${VIDEO_BITRATE}"
+        -maxrate "${VIDEO_BITRATE}"
+        -bufsize "${VIDEO_BITRATE}"
+        -g "${GOP_SIZE}"
+        -keyint_min "${GOP_SIZE}"
+        # Format and destination
+        -f flv
         "${TWITCH_INGEST_URL}${TWITCH_STREAM_KEY}"
     )
+
+    log INFO "Starting FFmpeg stream..."
 
     # Run ffmpeg in the background.
     ffmpeg "${ffmpeg_opts[@]}" &
@@ -188,12 +249,18 @@ start_streaming() {
 
 # Watch for changes and signal restart with debouncing.
 watch_for_changes() {
-    log INFO "Watching for changes in ${VIDEO_DIR}..."
+    local -a watch_dirs
+    watch_dirs=("${VIDEO_DIR}")
+    if [[ "${ENABLE_MUSIC}" == "true" ]]; then
+        watch_dirs+=("${MUSIC_DIR}")
+    fi
+
+    log INFO "Watching for changes in: ${watch_dirs[*]}..."
     # Watch for events that indicate a file has been completely written or moved into the directory.
     # - close_write: A file opened for writing was closed (for direct copies).
     # - moved_to: A file was moved/renamed into the directory (for atomic "safe copy" operations).
     # - delete: A file was deleted.
-    inotifywait -mq -e close_write -e moved_to -e delete "${VIDEO_DIR}" |
+    inotifywait -mqr -e close_write -e moved_to -e delete -e create "${watch_dirs[@]}" |
     while true; do
         # Wait for the first event. If the read fails, the pipe has closed.
         if ! read -r path event file; then
@@ -217,7 +284,8 @@ watch_for_changes() {
 
         log INFO "Debounce timer finished. Final change was: ${last_event} on ${last_path}${last_file}. Restarting stream..."
         kill_ffmpeg
-        generate_filelist
+        generate_videolist
+        generate_musiclist
         start_streaming
     done
 }
@@ -229,12 +297,15 @@ main() {
     check_dependencies
     check_env_vars
 
-    # Use a persistent file in the /data volume for the playlist.
-    FILE_LIST="/data/filelist.txt"
-    log INFO "Using filelist, which will be available on the host at ./data/filelist.txt"
+    # Use persistent files in the /data volume for the playlists.
+    VIDEO_FILE_LIST="/data/videolist.txt"
+    MUSIC_FILE_LIST="/data/musiclist.txt"
+    log INFO "Using videolist, which will be available on the host at ./data/videolist.txt"
+    log INFO "Using musiclist, which will be available on the host at ./data/musiclist.txt"
 
     # Initial setup
-    generate_filelist
+    generate_videolist
+    generate_musiclist
     start_streaming
     watch_for_changes
 }
