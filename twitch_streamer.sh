@@ -32,6 +32,7 @@ readonly ENABLE_FFMPEG_LOG_FILE=${ENABLE_FFMPEG_LOG_FILE:-"false"}
 # --- Global Variables ---
 VIDEO_FILE_LIST=""
 MUSIC_FILE_LIST=""
+VALIDATED_MUSIC_FILE_LIST=""
 FFMPEG_LOG_FILE=""
 FFMPEG_PID=""
 FFMPEG_PIPE=""
@@ -65,7 +66,7 @@ cleanup() {
 # Check for required commands.
 check_dependencies() {
     log INFO "Checking for required dependencies..."
-    for cmd in ffmpeg inotifywait; do
+    for cmd in ffmpeg ffprobe inotifywait; do
         if ! command -v "$cmd" &> /dev/null; then
             log ERROR "Required command '$cmd' is not installed. Please install it and try again."
             exit 1
@@ -181,6 +182,71 @@ generate_musiclist() {
     generate_playlist "${MUSIC_DIR}" "${MUSIC_FILE_TYPES}" "${MUSIC_FILE_LIST}" "Music"
 }
 
+# Validate music files for compatibility to prevent stream freezes.
+# It checks for consistent sample rate and channel layout.
+validate_music_files() {
+    if [[ "${ENABLE_MUSIC}" != "true" ]] || [[ ! -s "${MUSIC_FILE_LIST}" ]]; then
+        # Ensure the validated list is empty if music is disabled or no files are found.
+        > "${VALIDATED_MUSIC_FILE_LIST}"
+        return
+    fi
+
+    log INFO "Validating music files for stream compatibility..."
+    > "${VALIDATED_MUSIC_FILE_LIST}" # Start with a clean slate.
+
+    local reference_sample_rate=""
+    local reference_channel_layout=""
+    local reference_file=""
+
+    # Read the generated playlist file line by line.
+    while IFS= read -r line; do
+        # Extract file path from the format: file '/path/to/file.mp3'
+        if ! [[ "$line" =~ ^file\ \'(.*)\'$ ]]; then
+            continue
+        fi
+        local current_file="${BASH_REMATCH[1]}"
+
+        # Get audio properties using ffprobe.
+        local probe_output
+        if ! probe_output=$(ffprobe -v error -select_streams a:0 -show_entries stream=sample_rate,channel_layout -of default=noprint_wrappers=1:nokey=1 "${current_file}"); then
+            log WARNING "Could not probe audio stream for '$(basename "${current_file}")'. Skipping."
+            continue
+        fi
+
+        local current_sample_rate current_channel_layout
+        read -r current_sample_rate current_channel_layout <<< "${probe_output}"
+
+        # The first valid file sets the standard for the playlist.
+        if [[ -z "${reference_sample_rate}" ]]; then
+            reference_sample_rate="${current_sample_rate}"
+            reference_channel_layout="${current_channel_layout}"
+            reference_file="$(basename "${current_file}")"
+            log INFO "Music compatibility reference set by '${reference_file}': Sample Rate=${reference_sample_rate}, Layout=${reference_channel_layout}"
+            echo "$line" >> "${VALIDATED_MUSIC_FILE_LIST}"
+            continue
+        fi
+
+        # Validate subsequent files against the reference.
+        local is_compatible=true
+        if [[ "${current_sample_rate}" != "${reference_sample_rate}" ]]; then
+            log WARNING "Skipping '$(basename "${current_file}")' due to mismatched sample rate. Expected: ${reference_sample_rate}, Found: ${current_sample_rate}."
+            is_compatible=false
+        fi
+        if [[ "${current_channel_layout}" != "${reference_channel_layout}" ]]; then
+            log WARNING "Skipping '$(basename "${current_file}")' due to mismatched channel layout. Expected: ${reference_channel_layout}, Found: ${current_channel_layout}."
+            is_compatible=false
+        fi
+
+        if [[ "$is_compatible" == true ]]; then
+            echo "$line" >> "${VALIDATED_MUSIC_FILE_LIST}"
+        fi
+    done < "${MUSIC_FILE_LIST}"
+
+    if [[ ! -s "${VALIDATED_MUSIC_FILE_LIST}" ]]; then
+        log WARNING "No compatible music files found after validation. Music will be disabled for this stream."
+    fi
+}
+
 # Kill FFmpeg process safely
 kill_ffmpeg() {
     if [[ -n "$FFMPEG_PID" ]] && kill -0 "$FFMPEG_PID" &>/dev/null; then
@@ -226,9 +292,9 @@ start_streaming() {
 
     local -a ffmpeg_opts
     local music_enabled_and_found=false
-    if [[ "${ENABLE_MUSIC}" == "true" ]] && [[ -s "${MUSIC_FILE_LIST}" ]]; then
+    if [[ "${ENABLE_MUSIC}" == "true" ]] && [[ -s "${VALIDATED_MUSIC_FILE_LIST}" ]]; then
         music_enabled_and_found=true
-        log INFO "Music is enabled and music files were found. Replacing video audio with music playlist."
+        log INFO "Music is enabled and compatible music files were found. Replacing video audio with validated playlist."
     fi
 
     # Common options
@@ -239,7 +305,7 @@ start_streaming() {
     # The -re flag is crucial for the video input to simulate a live stream. It should NOT be applied to the audio input.
     ffmpeg_opts+=(-re -stream_loop -1 -f concat -safe 0 -i "${VIDEO_FILE_LIST}") # Video input
     if [[ "$music_enabled_and_found" == "true" ]]; then
-        ffmpeg_opts+=(-stream_loop -1 -f concat -safe 0 -i "${MUSIC_FILE_LIST}") # Music input
+        ffmpeg_opts+=(-stream_loop -1 -f concat -safe 0 -i "${VALIDATED_MUSIC_FILE_LIST}") # Music input
     fi
 
     # Video filter chain definition
@@ -248,10 +314,9 @@ start_streaming() {
     # Mapping and filtering options
     if [[ "$music_enabled_and_found" == "true" ]]; then
         # Use filter_complex to apply video filters and ensure seamless audio looping.
-        # The 'aresample=44100' filter standardizes all incoming audio to a 44.1kHz sample rate to prevent freezes with mixed-rate sources.
-        # The 'asetpts=PTS-STARTPTS' filter then resets audio timestamps each time the playlist loops,
+        # The 'asetpts=PTS-STARTPTS' filter resets audio timestamps each time the playlist loops,
         # creating a continuous stream and preventing ffmpeg from terminating.
-        ffmpeg_opts+=(-filter_complex "[0:v]${video_filter_chain}[v];[1:a]aresample=44100,asetpts=PTS-STARTPTS[a]" -map "[v]" -map "[a]")
+        ffmpeg_opts+=(-filter_complex "[0:v]${video_filter_chain}[v];[1:a]asetpts=PTS-STARTPTS[a]" -map "[v]" -map "[a]")
     else
         # No music, so map video and its original audio, and apply the video filter directly.
         ffmpeg_opts+=(-map 0:v:0 -map 0:a:0 -vf "${video_filter_chain}")
@@ -336,6 +401,7 @@ watch_for_changes() {
         kill_ffmpeg
         generate_videolist
         generate_musiclist
+        validate_music_files
         start_streaming
     done
 }
@@ -357,6 +423,7 @@ main() {
 
     if [[ "${ENABLE_MUSIC}" == "true" ]]; then
         MUSIC_FILE_LIST="/data/musiclist.txt"
+        VALIDATED_MUSIC_FILE_LIST="/data/validated_musiclist.txt"
         log INFO "Using musiclist, which will be available on the host at ./data/musiclist.txt"
     fi
 
@@ -369,6 +436,7 @@ main() {
     # Initial setup
     generate_videolist
     generate_musiclist
+    validate_music_files
     start_streaming
     watch_for_changes
 }

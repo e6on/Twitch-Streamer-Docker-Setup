@@ -154,6 +154,9 @@ To enable the background music feature, uncomment the following lines in `docker
 
 You can customize the MUSIC_FILE_TYPES to include other audio formats.
 
+**Note on Music Compatibility:** To ensure stream stability, the script automatically validates all music files. It uses the first valid song in the playlist to set a "gold standard" for audio properties (like sample rate and channel layout). Any subsequent songs that do not match these properties will be skipped, and a warning will be logged. This prevents the stream from freezing when encountering incompatible audio formats.
+
+
 ### FFmpeg Log File
 
 The main container log (`docker-compose logs -f`) is always kept clean, showing only important status messages and "Now Playing" information.
@@ -167,21 +170,6 @@ For advanced troubleshooting, you can enable a separate, verbose log file for FF
 # the full, verbose FFmpeg debug output to a file at ./data/ffmpeg.log.
 # This is useful for troubleshooting but can create large log files.
 - ENABLE_FFMPEG_LOG_FILE=true
-```
-
-When enabled, the full debug log will be available on your host at `./data/ffmpeg.log.
-
-### Twitch Ingest Server
-
-For the best performance, you should use the Twitch ingest server closest to your location. Choose a server close to you from https://help.twitch.tv/s/twitch-ingest-recommendation.
-
-Uncomment and change the `TWITCH_INGEST_URL` to your preferred server.
-
-```yaml
-# docker-compose.yaml
-# --- Optional Ingest Server ---
-# For best results, choose a server close to you from https://help.twitch.tv/s/twitch-ingest-recommendation
-TWITCH_INGEST_URL=rtmp://hel03.contribute.live-video.net/app/ # Example: Europe, Finland, Helsinki
 ```
 
 ## Verifying Hardware Acceleration
