@@ -248,9 +248,10 @@ start_streaming() {
     # Mapping and filtering options
     if [[ "$music_enabled_and_found" == "true" ]]; then
         # Use filter_complex to apply video filters and ensure seamless audio looping.
-        # The 'asetpts=PTS-STARTPTS' filter resets audio timestamps each time the playlist loops,
+        # The 'aresample=44100' filter standardizes all incoming audio to a 44.1kHz sample rate to prevent freezes with mixed-rate sources.
+        # The 'asetpts=PTS-STARTPTS' filter then resets audio timestamps each time the playlist loops,
         # creating a continuous stream and preventing ffmpeg from terminating.
-        ffmpeg_opts+=(-filter_complex "[0:v]${video_filter_chain}[v];[1:a]asetpts=PTS-STARTPTS[a]" -map "[v]" -map "[a]")
+        ffmpeg_opts+=(-filter_complex "[0:v]${video_filter_chain}[v];[1:a]aresample=44100,asetpts=PTS-STARTPTS[a]" -map "[v]" -map "[a]")
     else
         # No music, so map video and its original audio, and apply the video filter directly.
         ffmpeg_opts+=(-map 0:v:0 -map 0:a:0 -vf "${video_filter_chain}")
