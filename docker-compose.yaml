@@ -23,7 +23,7 @@ services:
       - TWITCH_STREAM_KEY
       - VIDEO_DIR=/videos
       # --- Optional Stream Quality Settings ---
-      # Uncomment and adjust these to change stream quality. Defaults are for a 960x540 25fps stream.
+      # Uncomment and adjust these to change stream quality. Defaults are for a 960x540 30fps stream.
       # - STREAM_RESOLUTION=1280x720
       # - STREAM_FRAMERATE=30
       # - VIDEO_BITRATE=3000k
@@ -34,6 +34,11 @@ services:
       - ENABLE_MUSIC=true
       - MUSIC_DIR=/music
       - MUSIC_FILE_TYPES="mp3 flac wav ogg"
+      # --- Optional FFmpeg File Logging ---
+      # The main container log is always clean. Uncomment the line below to also save
+      # the full, verbose FFmpeg debug output to a file at ./data/ffmpeg.log.
+      # This is useful for troubleshooting but can create large log files.
+      # - ENABLE_FFMPEG_LOG_FILE=true
       # --- Optional Ingest Server ---
       # For best results, choose a server close to you from https://help.twitch.tv/s/twitch-ingest-recommendation
       - TWITCH_INGEST_URL=rtmp://hel03.contribute.live-video.net/app/ # Europe: Finland, Helsinki

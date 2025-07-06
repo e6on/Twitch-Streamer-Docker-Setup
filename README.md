@@ -154,6 +154,22 @@ To enable the background music feature, uncomment the following lines in `docker
 
 You can customize the MUSIC_FILE_TYPES to include other audio formats.
 
+### FFmpeg Log File
+
+The main container log (`docker-compose logs -f`) is always kept clean, showing only important status messages and "Now Playing" information.
+
+For advanced troubleshooting, you can enable a separate, verbose log file for FFmpeg's debug output.
+
+```yaml
+# docker-compose.yaml
+# --- Optional FFmpeg File Logging ---
+# The main container log is always clean. Uncomment the line below to also save
+# the full, verbose FFmpeg debug output to a file at ./data/ffmpeg.log.
+# This is useful for troubleshooting but can create large log files.
+- ENABLE_FFMPEG_LOG_FILE=true
+```
+
+When enabled, the full debug log will be available on your host at `./data/ffmpeg.log.
 
 ### Twitch Ingest Server
 
