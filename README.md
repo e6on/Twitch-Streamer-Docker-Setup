@@ -8,6 +8,7 @@ A simple, efficient, and Docker-based solution for streaming a playlist of video
 -   **Hardware Accelerated:** Utilizes Intel QSV (VA-API) for efficient video encoding, keeping CPU usage low.
 -   **Dynamic Playlist:** Automatically detects new, deleted, or moved videos and restarts the stream to update the playlist.
 -   **Dockerized:** Easy to set up and run on any Linux system with Docker and a supported Intel GPU.
+-   **Media Validation:** Automatically validates video and audio tracks to prevent stream freezes from incompatible formats.
 -   **Highly Customizable:** Easily change stream resolution, framerate, bitrates, and ingest server via environment variables.
 -   **Persistent Playlist:** The generated playlist is stored in the `./data` volume for easy inspection.
 -   **Optional Background Music:** Replace the original video audio with a separate, continuously looping playlist of your own music.
@@ -150,11 +151,27 @@ To enable the background music feature, uncomment the following lines in `docker
 - ENABLE_MUSIC=true
 - MUSIC_DIR=/music
 - MUSIC_FILE_TYPES="mp3 flac wav ogg"
+- MUSIC_VOLUME=0.5 # Set music volume to 50%
 ```
+
+#### Music Volume
+You can also adjust the volume of the background music by setting the `MUSIC_VOLUME` variable.
+- 1.0 is the original volume (100%, default).
+- 0.5 is half volume (50%).
+- 1.5 is 1.5x volume (150%).
 
 You can customize the MUSIC_FILE_TYPES to include other audio formats.
 
-**Note on Music Compatibility:** To ensure stream stability, the script automatically validates all music files. It uses the first valid song in the playlist to set a "gold standard" for audio properties (like sample rate and channel layout). Any subsequent songs that do not match these properties will be skipped, and a warning will be logged. This prevents the stream from freezing when encountering incompatible audio formats.
+### Stream Stability and Media Validation
+
+To ensure a stable 24/7 stream, the script automatically validates all media files to prevent freezes caused by incompatible formats, which is especially important for hardware-accelerated encoding. The first valid file in a playlist sets a "gold standard" for properties. Any subsequent files with mismatched properties will be skipped, and a warning will be logged.
+
+-   **Video Validation:** All videos are checked for consistent resolution (e.g., `1920x1080`) and pixel format (e.g., `yuv420p`). The framerate is also validated, but with flexibility: videos with a framerate that is an exact multiple of the first video's framerate (e.g., 60fps is accepted if the first is 30fps) are also considered compatible.
+-   **Audio Validation:**
+    -   When background music is disabled, the audio from your video files is validated for consistent sample rate and channel count.
+    -   When background music is enabled, the audio from your music files is validated instead.
+
+This prevents the FFmpeg process from crashing when it encounters a video or audio stream that is different from the one it started with.
 
 
 ### FFmpeg Log File

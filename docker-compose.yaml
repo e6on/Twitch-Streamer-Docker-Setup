@@ -24,15 +24,16 @@ services:
       - VIDEO_DIR=/videos
       # --- Optional Stream Quality Settings ---
       # Uncomment and adjust these to change stream quality. Defaults are for a 960x540 30fps stream.
-      # - STREAM_RESOLUTION=1280x720
+      - STREAM_RESOLUTION=1280x720
       # - STREAM_FRAMERATE=30
-      # - VIDEO_BITRATE=3000k
+      - VIDEO_BITRATE=2500k
       # - AUDIO_BITRATE=160k
       - VIDEO_FILE_TYPES="mp4 mkv mpg mov" # Space-separated list of file extensions
       # --- Optional Background Music ---
       # Uncomment to enable a separate, continuously looping music track over your videos.
       - ENABLE_MUSIC=true
       - MUSIC_DIR=/music
+      - MUSIC_VOLUME=0.25 # Set music volume. 1.0 is 100%, 0.5 is 50%, 1.5 is 150%.
       - MUSIC_FILE_TYPES="mp3 flac wav ogg"
       # --- Optional FFmpeg File Logging ---
       # The main container log is always clean. Uncomment the line below to also save

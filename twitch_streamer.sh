@@ -25,13 +25,15 @@ readonly TWITCH_INGEST_URL=${TWITCH_INGEST_URL:-"rtmp://live.twitch.tv/app/"}
 readonly VIDEO_FILE_TYPES=${VIDEO_FILE_TYPES:-"mp4 mkv mpg mov"} # Space-separated list of video file extensions.
 readonly MUSIC_FILE_TYPES=${MUSIC_FILE_TYPES:-"mp3 flac wav ogg"} # Space-separated list of music file extensions.
 
-# --- Feature Flags ---
+# --- Music & Feature Flags ---
 readonly ENABLE_MUSIC=${ENABLE_MUSIC:-"false"}
 readonly ENABLE_FFMPEG_LOG_FILE=${ENABLE_FFMPEG_LOG_FILE:-"false"}
+readonly MUSIC_VOLUME=${MUSIC_VOLUME:-"1.0"} # Music volume. 1.0 is 100%, 0.5 is 50%.
 
 # --- Global Variables ---
 VIDEO_FILE_LIST=""
 MUSIC_FILE_LIST=""
+VALIDATED_VIDEO_FILE_LIST=""
 VALIDATED_MUSIC_FILE_LIST=""
 FFMPEG_LOG_FILE=""
 FFMPEG_PID=""
@@ -185,8 +187,13 @@ generate_musiclist() {
 # Validate music files for compatibility to prevent stream freezes.
 # It checks for consistent sample rate and channel layout.
 validate_music_files() {
-    if [[ "${ENABLE_MUSIC}" != "true" ]] || [[ ! -s "${MUSIC_FILE_LIST}" ]]; then
-        # Ensure the validated list is empty if music is disabled or no files are found.
+    if [[ "${ENABLE_MUSIC}" != "true" ]]; then
+        # Music is disabled, so there is nothing to validate.
+        return
+    fi
+
+    if [[ ! -s "${MUSIC_FILE_LIST}" ]]; then
+        # Music is enabled, but no files were found. Ensure the validated list is empty.
         > "${VALIDATED_MUSIC_FILE_LIST}"
         return
     fi
@@ -195,7 +202,7 @@ validate_music_files() {
     > "${VALIDATED_MUSIC_FILE_LIST}" # Start with a clean slate.
 
     local reference_sample_rate=""
-    local reference_channel_layout=""
+    local reference_channels=""
     local reference_file=""
 
     # Read the generated playlist file line by line.
@@ -208,20 +215,21 @@ validate_music_files() {
 
         # Get audio properties using ffprobe.
         local probe_output
-        if ! probe_output=$(ffprobe -v error -select_streams a:0 -show_entries stream=sample_rate,channel_layout -of default=noprint_wrappers=1:nokey=1 "${current_file}"); then
+        # Use the CSV output format to get a single line of comma-separated values.
+        if ! probe_output=$(ffprobe -v error -select_streams a:0 -show_entries stream=sample_rate,channels -of csv=p=0 "${current_file}"); then
             log WARNING "Could not probe audio stream for '$(basename "${current_file}")'. Skipping."
             continue
         fi
 
-        local current_sample_rate current_channel_layout
-        read -r current_sample_rate current_channel_layout <<< "${probe_output}"
+        local current_sample_rate current_channels="" # Initialize to prevent using value from previous iteration on error.
+        IFS=',' read -r current_sample_rate current_channels <<< "${probe_output}"
 
         # The first valid file sets the standard for the playlist.
         if [[ -z "${reference_sample_rate}" ]]; then
             reference_sample_rate="${current_sample_rate}"
-            reference_channel_layout="${current_channel_layout}"
+            reference_channels="${current_channels}"
             reference_file="$(basename "${current_file}")"
-            log INFO "Music compatibility reference set by '${reference_file}': Sample Rate=${reference_sample_rate}, Layout=${reference_channel_layout}"
+            log INFO "Music compatibility reference set by '${reference_file}': Sample Rate=${reference_sample_rate}, Channels=${reference_channels}"
             echo "$line" >> "${VALIDATED_MUSIC_FILE_LIST}"
             continue
         fi
@@ -232,8 +240,8 @@ validate_music_files() {
             log WARNING "Skipping '$(basename "${current_file}")' due to mismatched sample rate. Expected: ${reference_sample_rate}, Found: ${current_sample_rate}."
             is_compatible=false
         fi
-        if [[ "${current_channel_layout}" != "${reference_channel_layout}" ]]; then
-            log WARNING "Skipping '$(basename "${current_file}")' due to mismatched channel layout. Expected: ${reference_channel_layout}, Found: ${current_channel_layout}."
+        if [[ "${current_channels}" != "${reference_channels}" ]]; then
+            log WARNING "Skipping '$(basename "${current_file}")' due to mismatched audio channels. Expected: ${reference_channels}, Found: ${current_channels}."
             is_compatible=false
         fi
 
@@ -247,10 +255,135 @@ validate_music_files() {
     fi
 }
 
+# Validates video files for stream compatibility.
+# It checks for consistent resolution and pixel format.
+# If background music is disabled, it also validates audio for consistent sample rate and channels.
+validate_video_files() {
+    if [[ ! -s "${VIDEO_FILE_LIST}" ]]; then
+        > "${VALIDATED_VIDEO_FILE_LIST}"
+        return
+    fi
+
+    log INFO "Validating video files for stream compatibility..."
+    > "${VALIDATED_VIDEO_FILE_LIST}" # Start with a clean slate.
+
+    local reference_width=""
+    local reference_height=""
+    local reference_pix_fmt=""
+    local reference_frame_rate=""
+    local reference_sample_rate=""
+    local reference_channels=""
+    local reference_file=""
+
+    local validate_audio=true
+    if [[ "${ENABLE_MUSIC}" == "true" ]]; then
+        validate_audio=false
+        log INFO "Music is enabled; skipping video audio validation."
+    fi
+
+    while IFS= read -r line; do
+        if ! [[ "$line" =~ ^file\ \'(.*)\'$ ]]; then
+            continue
+        fi
+        local current_file="${BASH_REMATCH[1]}"
+
+        # --- Video Validation ---
+        local video_probe_output
+        if ! video_probe_output=$(ffprobe -v error -select_streams v:0 -show_entries stream=width,height,pix_fmt,r_frame_rate -of csv=p=0 "${current_file}"); then
+            log WARNING "Could not probe video stream for '$(basename "${current_file}")'. Skipping."
+            continue
+        fi
+        local current_width current_height current_pix_fmt current_frame_rate
+        IFS=',' read -r current_width current_height current_pix_fmt current_frame_rate <<< "${video_probe_output}"
+
+        # --- Audio Validation (if applicable) ---
+        local audio_probe_output current_sample_rate current_channels
+        if [[ "$validate_audio" == "true" ]]; then
+            if ! audio_probe_output=$(ffprobe -v error -select_streams a:0 -show_entries stream=sample_rate,channels -of csv=p=0 "${current_file}"); then
+                log WARNING "Could not probe audio stream for video '$(basename "${current_file}")'. It might not have audio. Skipping."
+                continue
+            fi
+            IFS=',' read -r current_sample_rate current_channels <<< "${audio_probe_output}"
+        fi
+
+        # --- Set Reference from First File ---
+        if [[ -z "${reference_width}" ]]; then
+            reference_width="${current_width}"
+            reference_height="${current_height}"
+            reference_pix_fmt="${current_pix_fmt}"
+            reference_frame_rate="${current_frame_rate}"
+            reference_file="$(basename "${current_file}")"
+            local ref_log_msg="Video compatibility reference set by '${reference_file}': Resolution=${reference_width}x${reference_height}, PixelFormat=${reference_pix_fmt}, FrameRate=${reference_frame_rate}"
+
+            if [[ "$validate_audio" == "true" ]]; then
+                reference_sample_rate="${current_sample_rate}"
+                reference_channels="${current_channels}"
+                ref_log_msg+=", AudioSampleRate=${reference_sample_rate}, AudioChannels=${reference_channels}"
+            fi
+            log INFO "${ref_log_msg}"
+            echo "$line" >> "${VALIDATED_VIDEO_FILE_LIST}"
+            continue
+        fi
+
+        # --- Compare Subsequent Files to Reference ---
+        local is_compatible=true
+        # Video checks
+        if [[ "${current_width}" != "${reference_width}" ]] || [[ "${current_height}" != "${reference_height}" ]]; then
+            log WARNING "Skipping video '$(basename "${current_file}")' due to mismatched resolution. Expected: ${reference_width}x${reference_height}, Found: ${current_width}x${current_height}."
+            is_compatible=false
+        fi
+        if [[ "${current_pix_fmt}" != "${reference_pix_fmt}" ]]; then
+            log WARNING "Skipping video '$(basename "${current_file}")' due to mismatched pixel format. Expected: ${reference_pix_fmt}, Found: ${current_pix_fmt}."
+            is_compatible=false
+        fi
+        # Frame rate check: allow exact matches or integer multiples (e.g., 60fps is ok if reference is 30fps).
+        if [[ "${current_frame_rate}" != "${reference_frame_rate}" ]]; then
+            local ref_num ref_den cur_num cur_den
+            IFS='/' read -r ref_num ref_den <<< "${reference_frame_rate}"
+            IFS='/' read -r cur_num cur_den <<< "${current_frame_rate}"
+            ref_den=${ref_den:-1}
+            cur_den=${cur_den:-1}
+
+            # We check if (cur_num / cur_den) is an integer multiple of (ref_num / ref_den).
+            # This is equivalent to checking if (cur_num * ref_den) % (cur_den * ref_num) == 0.
+            # The multiple must also be >= 1.
+            local numerator=$((cur_num * ref_den))
+            local denominator=$((cur_den * ref_num))
+
+            if (( denominator > 0 && numerator >= denominator && (numerator % denominator) == 0 )); then
+                log INFO "Video '$(basename "${current_file}")' has a compatible frame rate (${current_frame_rate}). Accepting."
+            else
+                log WARNING "Skipping video '$(basename "${current_file}")' due to incompatible frame rate. Expected: ${reference_frame_rate} or a multiple, Found: ${current_frame_rate}."
+                is_compatible=false
+            fi
+        fi
+
+        # Audio checks
+        if [[ "$validate_audio" == "true" ]]; then
+            if [[ "${current_sample_rate}" != "${reference_sample_rate}" ]]; then
+                log WARNING "Skipping video '$(basename "${current_file}")' due to mismatched audio sample rate. Expected: ${reference_sample_rate}, Found: ${current_sample_rate}."
+                is_compatible=false
+            fi
+            if [[ "${current_channels}" != "${reference_channels}" ]]; then
+                log WARNING "Skipping video '$(basename "${current_file}")' due to mismatched audio channels. Expected: ${reference_channels}, Found: ${current_channels}."
+                is_compatible=false
+            fi
+        fi
+
+        if [[ "$is_compatible" == true ]]; then
+            echo "$line" >> "${VALIDATED_VIDEO_FILE_LIST}"
+        fi
+    done < "${VIDEO_FILE_LIST}"
+
+    if [[ ! -s "${VALIDATED_VIDEO_FILE_LIST}" ]]; then
+        log WARNING "No videos with compatible properties found after validation. The stream will not start."
+    fi
+}
+
 # Kill FFmpeg process safely
 kill_ffmpeg() {
     if [[ -n "$FFMPEG_PID" ]] && kill -0 "$FFMPEG_PID" &>/dev/null; then
-        log INFO "Stopping FFmpeg process (PID: $FFMPEG_PID)..."
+        log WARNING "Stopping FFmpeg process (PID: $FFMPEG_PID)..."
         kill "$FFMPEG_PID"
         # Wait for the process to terminate, suppressing errors if it's already gone.
         wait "$FFMPEG_PID" &>/dev/null || true
@@ -285,8 +418,8 @@ process_ffmpeg_output() {
 
 # Start FFmpeg streaming
 start_streaming() {
-    if [[ ! -s "${VIDEO_FILE_LIST}" ]]; then
-        log WARNING "No video files found in ${VIDEO_DIR}. Waiting for files to be added."
+    if [[ ! -s "${VALIDATED_VIDEO_FILE_LIST}" ]]; then
+        log WARNING "No compatible video files found to stream. Waiting for files to be added or corrected."
         return
     fi
 
@@ -303,7 +436,7 @@ start_streaming() {
 
     # Input options
     # The -re flag is crucial for the video input to simulate a live stream. It should NOT be applied to the audio input.
-    ffmpeg_opts+=(-re -stream_loop -1 -f concat -safe 0 -i "${VIDEO_FILE_LIST}") # Video input
+    ffmpeg_opts+=(-re -stream_loop -1 -f concat -safe 0 -i "${VALIDATED_VIDEO_FILE_LIST}") # Video input
     if [[ "$music_enabled_and_found" == "true" ]]; then
         ffmpeg_opts+=(-stream_loop -1 -f concat -safe 0 -i "${VALIDATED_MUSIC_FILE_LIST}") # Music input
     fi
@@ -313,10 +446,12 @@ start_streaming() {
 
     # Mapping and filtering options
     if [[ "$music_enabled_and_found" == "true" ]]; then
+        log INFO "Setting music volume to ${MUSIC_VOLUME}"
+        local audio_filter_chain="volume=${MUSIC_VOLUME},asetpts=PTS-STARTPTS"
         # Use filter_complex to apply video filters and ensure seamless audio looping.
         # The 'asetpts=PTS-STARTPTS' filter resets audio timestamps each time the playlist loops,
         # creating a continuous stream and preventing ffmpeg from terminating.
-        ffmpeg_opts+=(-filter_complex "[0:v]${video_filter_chain}[v];[1:a]asetpts=PTS-STARTPTS[a]" -map "[v]" -map "[a]")
+        ffmpeg_opts+=(-filter_complex "[0:v]${video_filter_chain}[v];[1:a]${audio_filter_chain}[a]" -map "[v]" -map "[a]")
     else
         # No music, so map video and its original audio, and apply the video filter directly.
         ffmpeg_opts+=(-map 0:v:0 -map 0:a:0 -vf "${video_filter_chain}")
@@ -387,19 +522,20 @@ watch_for_changes() {
         local last_path="${path}"
         local last_event="${event}"
         local last_file="${file}"
-        log INFO "Change detected (${last_event} on ${last_path}${last_file}). Debouncing for ${RESTART_DEBOUNCE_SECONDS}s..."
+        log WARNING "Change detected (${last_event} on ${last_path}${last_file}). Debouncing for ${RESTART_DEBOUNCE_SECONDS}s..."
 
         # Consume subsequent events for the debounce period.
         while read -r -t "${RESTART_DEBOUNCE_SECONDS}" path event file; do
             last_path="${path}"
             last_event="${event}"
             last_file="${file}"
-            log INFO "Further change detected (${last_event} on ${last_path}${last_file}). Resetting debounce timer."
+            log WARNING "Further change detected (${last_event} on ${last_path}${last_file}). Resetting debounce timer."
         done
 
-        log INFO "Debounce timer finished. Final change was: ${last_event} on ${last_path}${last_file}. Restarting stream..."
+        log WARNING "Debounce timer finished. Final change was: ${last_event} on ${last_path}${last_file}. Restarting stream..."
         kill_ffmpeg
         generate_videolist
+        validate_video_files
         generate_musiclist
         validate_music_files
         start_streaming
@@ -419,6 +555,7 @@ main() {
 
     # Use persistent files in the /data volume for the playlists.
     VIDEO_FILE_LIST="/data/videolist.txt"
+    VALIDATED_VIDEO_FILE_LIST="/data/validated_videolist.txt"
     log INFO "Using videolist, which will be available on the host at ./data/videolist.txt"
 
     if [[ "${ENABLE_MUSIC}" == "true" ]]; then
@@ -429,12 +566,13 @@ main() {
 
     if [[ "${ENABLE_FFMPEG_LOG_FILE}" == "true" ]]; then
         FFMPEG_LOG_FILE="/data/ffmpeg.log"
-        log INFO "FFmpeg debug logs will be written to a file, accessible on the host at ./data/ffmpeg.log"
+        log WARNING "FFmpeg debug logs will be written to a file, accessible on the host at ./data/ffmpeg.log"
         # Overwrite the log file on start to prevent it from growing indefinitely across container restarts.
         > "${FFMPEG_LOG_FILE}"
     fi
     # Initial setup
     generate_videolist
+    validate_video_files
     generate_musiclist
     validate_music_files
     start_streaming
