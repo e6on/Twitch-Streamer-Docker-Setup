@@ -68,7 +68,7 @@ cleanup() {
 # Check for required commands.
 check_dependencies() {
     log INFO "Checking for required dependencies..."
-    for cmd in ffmpeg ffprobe inotifywait; do
+    for cmd in ffmpeg ffprobe inotifywait bc; do
         if ! command -v "$cmd" &> /dev/null; then
             log ERROR "Required command '$cmd' is not installed. Please install it and try again."
             exit 1
@@ -392,6 +392,52 @@ kill_ffmpeg() {
     # The log processor will exit on its own when the pipe is broken.
 }
 
+# Calculates and logs the total duration of a playlist.
+# Arguments:
+#   $1: Path to the validated playlist file.
+#   $2: Media type for logging (e.g., "Video", "Music").
+log_total_playlist_duration() {
+    local playlist_file="$1"
+    local media_type="$2"
+    # Use scale=4 for bc to handle floating point numbers from ffprobe.
+    local total_duration_seconds="0.0"
+
+    if [[ ! -s "${playlist_file}" ]]; then
+        # This is not an error, just means an empty playlist.
+        return
+    fi
+
+    log INFO "Calculating total ${media_type} playlist duration..."
+    while IFS= read -r line; do
+        if ! [[ "$line" =~ ^file\ \'(.*)\'$ ]]; then
+            continue
+        fi
+        local current_file="${BASH_REMATCH[1]}"
+
+        local duration
+        if ! duration=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${current_file}"); then
+            log WARNING "Could not get duration for '$(basename "${current_file}")'. Skipping from total calculation."
+            continue
+        fi
+        if [[ -z "$duration" ]]; then
+            log WARNING "Could not get duration for '$(basename "${current_file}")' (duration was empty). Skipping from total calculation."
+            continue
+        fi
+        total_duration_seconds=$(echo "scale=4; ${total_duration_seconds} + ${duration}" | bc)
+    done < "${playlist_file}"
+
+    # Format the duration into Dd HH:MM:SS
+    if (( $(echo "${total_duration_seconds} > 0" | bc -l) )); then
+        local total_seconds_int
+        total_seconds_int=$(printf "%.0f" "${total_duration_seconds}")
+        local days=$((total_seconds_int / 86400)); local hours=$(((total_seconds_int % 86400) / 3600)); local minutes=$(((total_seconds_int % 3600) / 60)); local seconds=$((total_seconds_int % 60))
+        local formatted_duration=""
+        if (( days > 0 )); then formatted_duration+="${days}d "; fi
+        formatted_duration+=$(printf "%02d:%02d:%02d" "${hours}" "${minutes}" "${seconds}")
+        log INFO "Total ${media_type} playlist duration: ${YELLOW}${formatted_duration}${NC}"
+    fi
+}
+
 # Process FFmpeg's stderr to log currently playing files.
 process_ffmpeg_output() {
     # This function reads from FFmpeg's stderr line by line.
@@ -538,6 +584,8 @@ watch_for_changes() {
         validate_video_files
         generate_musiclist
         validate_music_files
+        log_total_playlist_duration "${VALIDATED_VIDEO_FILE_LIST}" "Video"
+        [[ "${ENABLE_MUSIC}" == "true" ]] && log_total_playlist_duration "${VALIDATED_MUSIC_FILE_LIST}" "Music"
         start_streaming
     done
 }
@@ -575,6 +623,8 @@ main() {
     validate_video_files
     generate_musiclist
     validate_music_files
+    log_total_playlist_duration "${VALIDATED_VIDEO_FILE_LIST}" "Video"
+    [[ "${ENABLE_MUSIC}" == "true" ]] && log_total_playlist_duration "${VALIDATED_MUSIC_FILE_LIST}" "Music"
     start_streaming
     watch_for_changes
 }

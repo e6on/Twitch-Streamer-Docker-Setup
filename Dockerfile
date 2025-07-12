@@ -36,6 +36,8 @@ RUN sed -i 's/ main/ main contrib non-free non-free-firmware/g' /etc/apt/sources
     intel-media-va-driver-non-free \
     # Script dependencies
     inotify-tools \
+    # bc is used for floating point math in the script
+    bc \
     # Timezone data
     tzdata \
     ca-certificates && \
