@@ -344,17 +344,29 @@ validate_video_files() {
             ref_den=${ref_den:-1}
             cur_den=${cur_den:-1}
 
-            # We check if (cur_num / cur_den) is an integer multiple of (ref_num / ref_den).
-            # This is equivalent to checking if (cur_num * ref_den) % (cur_den * ref_num) == 0.
-            # The multiple must also be >= 1.
-            local numerator=$((cur_num * ref_den))
-            local denominator=$((cur_den * ref_num))
+            # Use 'bc' for floating-point math to handle common near-integer framerates like 29.97 (30000/1001) vs 30.
+            # We calculate the ratio and check if it's very close to an integer (e.g., 1.0, 2.0, etc.).
+            local denominator_val
+            denominator_val=$(echo "${cur_den} * ${ref_num}" | bc)
 
-            if (( denominator > 0 && numerator >= denominator && (numerator % denominator) == 0 )); then
-                log INFO "Video '$(basename "${current_file}")' has a compatible frame rate (${current_frame_rate}). Accepting."
-            else
-                log WARNING "Skipping video '$(basename "${current_file}")' due to incompatible frame rate. Expected: ${reference_frame_rate} or a multiple, Found: ${current_frame_rate}."
+            if (( $(echo "${denominator_val} == 0" | bc -l) )); then
+                log WARNING "Skipping video '$(basename "${current_file}")' due to invalid reference frame rate resulting in division by zero."
                 is_compatible=false
+            else
+                local ratio
+                ratio=$(echo "scale=5; (${cur_num} * ${ref_den}) / ${denominator_val}" | bc)
+                local rounded_ratio
+                rounded_ratio=$(printf "%.0f" "${ratio}")
+                local diff
+                diff=$(echo "scale=5; d = ${ratio} - ${rounded_ratio}; if (d < 0) d = -d; d" | bc)
+
+                # Allow if the ratio is a multiple (>= 1) and the difference from a whole number is negligible (e.g., 0.999 or 2.001).
+                if (( $(echo "${ratio} >= 0.99 && ${diff} < 0.01" | bc -l) )); then
+                    log INFO "Video '$(basename "${current_file}")' has a compatible frame rate (${current_frame_rate}). Accepting."
+                else
+                    log WARNING "Skipping video '$(basename "${current_file}")' due to incompatible frame rate. Expected: ${reference_frame_rate} or a multiple, Found: ${current_frame_rate}."
+                    is_compatible=false
+                fi
             fi
         fi
 
