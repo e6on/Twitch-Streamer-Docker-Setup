@@ -13,6 +13,13 @@ readonly NC='\033[0m' # No Color
 # Time to wait after a file change before restarting, to batch multiple changes.
 readonly RESTART_DEBOUNCE_SECONDS=5
 
+# --- Stall Detection Configuration ---
+# How often (in seconds) to check if ffmpeg is stalled.
+readonly STALL_MONITOR_INTERVAL=15
+# How many times the speed must be 0/s before we declare it stalled and restart.
+# (e.g., 4 * 15s = 60 seconds of zero activity before restart).
+readonly STALL_THRESHOLD=4
+
 # --- Stream Configuration (can be overridden by environment variables) ---
 readonly STREAM_RESOLUTION=${STREAM_RESOLUTION:-"960x540"}
 readonly STREAM_FRAMERATE=${STREAM_FRAMERATE:-"30"}
@@ -35,9 +42,13 @@ VIDEO_FILE_LIST=""
 MUSIC_FILE_LIST=""
 VALIDATED_VIDEO_FILE_LIST=""
 VALIDATED_MUSIC_FILE_LIST=""
+FILTERED_VIDEO_FILE_LIST=""
+EXCLUDED_VIDEO_FILE_PATH="/data/excluded_videos.txt"
+NEW_VIDEO_TIMESTAMP_FILE="/data/new_video_started.tmp"
 FFMPEG_LOG_FILE=""
 FFMPEG_PID=""
 FFMPEG_PIPE=""
+CURRENTLY_PLAYING_VIDEO_BASENAME=""
 
 # Logging function
 log() {
@@ -336,35 +347,42 @@ validate_video_files() {
             log WARNING "Skipping video '$(basename "${current_file}")' due to mismatched pixel format. Expected: ${reference_pix_fmt}, Found: ${current_pix_fmt}."
             is_compatible=false
         fi
-        # Frame rate check: allow exact matches or integer multiples (e.g., 60fps is ok if reference is 30fps).
+        # Frame rate check: allow if one frame rate is an integer multiple of the other (e.g., 30/60, 60/30, 24/48).
         if [[ "${current_frame_rate}" != "${reference_frame_rate}" ]]; then
             local ref_num ref_den cur_num cur_den
             IFS='/' read -r ref_num ref_den <<< "${reference_frame_rate}"
+            ref_den=${ref_den:-1} # Default denominator to 1 if not specified (e.g. 30 instead of 30/1)
             IFS='/' read -r cur_num cur_den <<< "${current_frame_rate}"
-            ref_den=${ref_den:-1}
-            cur_den=${cur_den:-1}
+            cur_den=${cur_den:-1} # Default denominator to 1
 
-            # Use 'bc' for floating-point math to handle common near-integer framerates like 29.97 (30000/1001) vs 30.
-            # We calculate the ratio and check if it's very close to an integer (e.g., 1.0, 2.0, etc.).
-            local denominator_val
-            denominator_val=$(echo "${cur_den} * ${ref_num}" | bc)
-
-            if (( $(echo "${denominator_val} == 0" | bc -l) )); then
-                log WARNING "Skipping video '$(basename "${current_file}")' due to invalid reference frame rate resulting in division by zero."
+            # Use 'bc' for floating-point math to handle fractional frame rates like 29.97 (30000/1001).
+            # To avoid division by zero if a frame rate is reported as 0/0 or similar.
+            if (( $(echo "(${cur_den} * ${ref_num}) == 0" | bc -l) )) || (( $(echo "(${ref_den} * ${cur_num}) == 0" | bc -l) )); then
+                log WARNING "Skipping video '$(basename "${current_file}")' due to zero value in frame rate calculation. Ref: ${reference_frame_rate}, Current: ${current_frame_rate}."
                 is_compatible=false
             else
-                local ratio
-                ratio=$(echo "scale=5; (${cur_num} * ${ref_den}) / ${denominator_val}" | bc)
-                local rounded_ratio
-                rounded_ratio=$(printf "%.0f" "${ratio}")
-                local diff
-                diff=$(echo "scale=5; d = ${ratio} - ${rounded_ratio}; if (d < 0) d = -d; d" | bc)
+                # Calculate two ratios: current/reference and reference/current.
+                local ratio_cur_over_ref ratio_ref_over_cur
+                ratio_cur_over_ref=$(echo "scale=5; (${cur_num} * ${ref_den}) / (${cur_den} * ${ref_num})" | bc)
+                ratio_ref_over_cur=$(echo "scale=5; (${ref_num} * ${cur_den}) / (${ref_den} * ${cur_num})" | bc)
 
-                # Allow if the ratio is a multiple (>= 1) and the difference from a whole number is negligible (e.g., 0.999 or 2.001).
-                if (( $(echo "${ratio} >= 0.99 && ${diff} < 0.01" | bc -l) )); then
-                    log INFO "Video '$(basename "${current_file}")' has a compatible frame rate (${current_frame_rate}). Accepting."
+                # Check if either ratio is close to an integer >= 1.
+                local is_multiple=0
+                for ratio in "${ratio_cur_over_ref}" "${ratio_ref_over_cur}"; do
+                    local rounded_ratio
+                    rounded_ratio=$(printf "%.0f" "${ratio}")
+                    local diff
+                    diff=$(echo "scale=5; d = ${ratio} - ${rounded_ratio}; if (d < 0) d = -d; d" | bc)
+                    # A ratio is considered a valid multiple if it's >= 1 (within a tolerance) and close to a whole number.
+                    if (( $(echo "${ratio} >= 0.99 && ${diff} < 0.01" | bc -l) )); then
+                        is_multiple=1
+                        break
+                    fi
+                done
+                if [[ "${is_multiple}" -eq 1 ]]; then
+                    log INFO "Video '$(basename "${current_file}")' has a frame rate (${current_frame_rate}). Accepting."
                 else
-                    log WARNING "Skipping video '$(basename "${current_file}")' due to incompatible frame rate. Expected: ${reference_frame_rate} or a multiple, Found: ${current_frame_rate}."
+                    log WARNING "Skipping video '$(basename "${current_file}")' due to incompatible frame rate. Expected a multiple or divisor of ${reference_frame_rate}, but found ${current_frame_rate}."
                     is_compatible=false
                 fi
             fi
@@ -392,16 +410,74 @@ validate_video_files() {
     fi
 }
 
+# Filters the validated video list based on EXCLUDED_VIDEO_FILES
+filter_excluded_files() {
+    local input_list="${VALIDATED_VIDEO_FILE_LIST}"
+    local output_list="${FILTERED_VIDEO_FILE_LIST}"
+
+    log INFO "Filtering excluded video files from ${input_list} to ${output_list}..."
+    > "${output_list}" # Start with a clean slate.
+
+    # Initialize EXCLUDED_VIDEO_FILES as an empty array
+    local -a EXCLUDED_VIDEO_FILES=()
+
+    if [[ -f "${EXCLUDED_VIDEO_FILE_PATH}" ]]; then
+        mapfile -t EXCLUDED_VIDEO_FILES < "${EXCLUDED_VIDEO_FILE_PATH}"
+    fi
+
+    if [[ ${#EXCLUDED_VIDEO_FILES[@]} -eq 0 ]]; then # Check if array is empty
+        log INFO "No video files to exclude."
+        cp "${input_list}" "${output_list}" || true # Copy if no exclusions
+        return
+    fi
+
+    # Read the validated list line by line and filter
+    while IFS= read -r line; do
+        if ! [[ "$line" =~ ^file\ \'(.*)\'$ ]]; then
+            continue
+        fi
+        local current_file_path="${BASH_REMATCH[1]}"
+        local current_file_basename=$(basename "${current_file_path}")
+
+        local is_excluded=false
+        for excluded_file in "${EXCLUDED_VIDEO_FILES[@]}"; do
+            # Compare basename for exclusion
+            if [[ "${current_file_basename}" == "${excluded_file}" ]]; then
+                log WARNING "Excluding video: '${current_file_basename}' (previously caused stall)."
+                is_excluded=true
+                break
+            fi
+        done
+
+        if [[ "$is_excluded" == false ]]; then
+            echo "$line" >> "${output_list}"
+        fi
+    done < "${input_list}"
+
+    if [[ ! -s "${output_list}" ]]; then
+        log ERROR "No video files remaining after exclusion. Stream might not start."
+    else
+        log INFO "Filtered video playlist created at ${output_list}."
+    fi
+}
+
 # Kill FFmpeg process safely
 kill_ffmpeg() {
-    if [[ -n "$FFMPEG_PID" ]] && kill -0 "$FFMPEG_PID" &>/dev/null; then
-        log WARNING "Stopping FFmpeg process (PID: $FFMPEG_PID)..."
-        kill "$FFMPEG_PID"
-        # Wait for the process to terminate, suppressing errors if it's already gone.
-        wait "$FFMPEG_PID" &>/dev/null || true
+    # Fallback: Kill all ffmpeg processes using pidof
+    ffmpeg_pids=$(pidof ffmpeg || true)
+    if [[ -n "$ffmpeg_pids" ]]; then
+        for pid in $ffmpeg_pids; do
+            log WARNING "Killing FFmpeg process with PID: $pid"
+            kill "$pid" || true
+            sleep 2
+            if kill -0 "$pid" &>/dev/null; then
+                log WARNING "FFmpeg PID $pid did not terminate. Sending SIGKILL..."
+                kill -9 "$pid" || true
+            fi
+            wait "$pid" 2>/dev/null || true
+        done
     fi
     FFMPEG_PID=""
-    # The log processor will exit on its own when the pipe is broken.
 }
 
 # Calculates and logs the total duration of a playlist.
@@ -459,25 +535,23 @@ process_ffmpeg_output() {
         # Example 1: [concat @ 0x...] Opening '/videos/video1.mp4' for reading
         # Example 2: [AVFormatContext @ 0x...] Opening '/videos/video1.mp4' for reading
         if [[ "$line" =~ \[(concat|AVFormatContext).*\]\ Opening\ \'(.+)\'\ for\ reading ]]; then
-            local playing_file
-            playing_file="${BASH_REMATCH[2]}"
-            # Determine if it's a video or music file based on its path and log it.
+            local playing_file="${BASH_REMATCH[2]}"
             if [[ "$playing_file" == "${VIDEO_DIR}"* ]]; then
                 log INFO "Now Playing Video: $(basename "${playing_file}")"
+                CURRENTLY_PLAYING_VIDEO_BASENAME="$(basename "${playing_file}")"
+                # Signal that a new video has started playing
+                touch "${NEW_VIDEO_TIMESTAMP_FILE}"
             elif [[ "${ENABLE_MUSIC}" == "true" && "$playing_file" == "${MUSIC_DIR}"* ]]; then
                 log INFO "Now Playing Music: $(basename "${playing_file}")"
             fi
         fi
-        # The raw ffmpeg output is intentionally not echoed here. This function's only job is to parse
-        # the stream for "Now Playing" events, keeping the main container log clean. The full debug log
-        # is either sent to a file (if enabled) or discarded.
     done
 }
 
 # Start FFmpeg streaming
 start_streaming() {
-    if [[ ! -s "${VALIDATED_VIDEO_FILE_LIST}" ]]; then
-        log WARNING "No compatible video files found to stream. Waiting for files to be added or corrected."
+    if [[ ! -s "${FILTERED_VIDEO_FILE_LIST}" ]]; then
+        log WARNING "No compatible video files found to stream after exclusion. Waiting for files to be added or corrected."
         return
     fi
 
@@ -485,7 +559,7 @@ start_streaming() {
     local music_enabled_and_found=false
     if [[ "${ENABLE_MUSIC}" == "true" ]] && [[ -s "${VALIDATED_MUSIC_FILE_LIST}" ]]; then
         music_enabled_and_found=true
-        log INFO "Music is enabled and compatible music files were found. Replacing video audio with validated playlist."
+        log INFO "Music is enabled and music files were found. Replacing video audio with validated playlist."
     fi
 
     # Common options
@@ -494,7 +568,7 @@ start_streaming() {
 
     # Input options
     # The -re flag is crucial for the video input to simulate a live stream. It should NOT be applied to the audio input.
-    ffmpeg_opts+=(-re -stream_loop -1 -f concat -safe 0 -i "${VALIDATED_VIDEO_FILE_LIST}") # Video input
+    ffmpeg_opts+=(-re -stream_loop -1 -f concat -safe 0 -i "${FILTERED_VIDEO_FILE_LIST}") # Video input
     if [[ "$music_enabled_and_found" == "true" ]]; then
         ffmpeg_opts+=(-stream_loop -1 -f concat -safe 0 -i "${VALIDATED_MUSIC_FILE_LIST}") # Music input
     fi
@@ -554,6 +628,89 @@ start_streaming() {
     log INFO "FFmpeg started with PID: ${FFMPEG_PID}"
 }
 
+# Monitors the running FFmpeg process for stalls and restarts it if needed.
+monitor_for_stall() {
+    set +e  # Disable exit on error inside stall monitor loop
+    local stall_counter=0
+    local last_progress_percentage=0.0
+    local last_video_start_timestamp=$(stat -c %Y "${NEW_VIDEO_TIMESTAMP_FILE}") # Initialize with current timestamp
+    log INFO "Starting FFmpeg stall monitor."
+    while true; do
+        sleep "${STALL_MONITOR_INTERVAL}"
+
+        if [[ -n "${FFMPEG_PID}" ]] && kill -0 "${FFMPEG_PID}" &>/dev/null; then
+            # log INFO "[Stall Monitor] Heartbeat - loop is running."
+
+            # Check for new video file start via timestamp file
+            local current_video_start_timestamp=$(stat -c %Y "${NEW_VIDEO_TIMESTAMP_FILE}")
+            if [[ "$current_video_start_timestamp" -gt "$last_video_start_timestamp" ]]; then
+                # log INFO "[Stall Monitor] New video file detected. Resetting progress monitor."
+                last_progress_percentage=0.0
+                stall_counter=0
+                last_video_start_timestamp="$current_video_start_timestamp"
+                continue # Skip current progress check as new video just started
+            fi
+
+            local progress_output
+            progress_output=$(progress -c ffmpeg 2>&1)
+
+            # log INFO "[Stall Monitor] $progress_output"
+
+            local current_progress_percentage
+            # Extract the percentage value. Example: "0.4% (64.0 KiB / 16.3 MiB)" -> "0.4"
+            current_progress_percentage=$(echo "$progress_output" | grep -oE '[0-9]+(\.[0-9]+)?%' | head -n 1 | sed 's/%//')
+
+            # Extract currently playing file from progress output
+            local playing_file_from_progress=""
+            
+            if [[ "$progress_output" =~ ffmpeg\ ([^[:space:]]+) ]]; then
+                playing_file_from_progress="${BASH_REMATCH[1]}"
+                # Extract basename only
+                CURRENTLY_PLAYING_VIDEO_BASENAME=$(basename "${playing_file_from_progress}")
+                # log INFO "---- Currently playing: ${CURRENTLY_PLAYING_VIDEO_BASENAME}"
+            fi
+
+
+            # log INFO "[Stall Monitor] Current progress: ${current_progress_percentage}% (Last: ${last_progress_percentage}%)"
+
+            if (( $(echo "$current_progress_percentage <= $last_progress_percentage" | bc -l) )); then
+                ((stall_counter++))
+                log WARNING "[Stall Monitor] FFmpeg is not playing. Counter: ${stall_counter}/${STALL_THRESHOLD}."
+                if (( stall_counter >= STALL_THRESHOLD )); then
+                    log ERROR "FFmpeg appears to be stalled. Restarting stream..."
+                    log WARNING "Last played file was: '${CURRENTLY_PLAYING_VIDEO_BASENAME}'."
+                    if [[ -n "${CURRENTLY_PLAYING_VIDEO_BASENAME}" ]]; then
+                        log ERROR "Adding '${CURRENTLY_PLAYING_VIDEO_BASENAME}' to exclusion list due to stall."
+						echo "${CURRENTLY_PLAYING_VIDEO_BASENAME}" >> "${EXCLUDED_VIDEO_FILE_PATH}"
+                    else
+                        log WARNING "Could not identify currently playing file to add to exclusion list."
+                    fi
+                    kill_ffmpeg
+                    # Re-generate and validate playlists after updating exclusion list
+                    generate_videolist
+                    validate_video_files
+                    filter_excluded_files # Apply exclusion
+                    generate_musiclist
+                    validate_music_files
+                    log_total_playlist_duration "${FILTERED_VIDEO_FILE_LIST}" "Video" # Log from the filtered list
+                    [[ "${ENABLE_MUSIC}" == "true" ]] && log_total_playlist_duration "${VALIDATED_MUSIC_FILE_LIST}" "Music"
+                    start_streaming
+                    stall_counter=0
+                    last_progress_percentage=0.0
+                    last_video_start_timestamp=$(stat -c %Y "${NEW_VIDEO_TIMESTAMP_FILE}") # Reset timestamp after restart
+                fi
+            else
+                stall_counter=0
+                last_progress_percentage=$current_progress_percentage
+            fi
+        else
+            stall_counter=0
+            last_progress_percentage=0.0
+            last_video_start_timestamp=$(stat -c %Y "${NEW_VIDEO_TIMESTAMP_FILE}") # Reset timestamp if FFmpeg is not running
+        fi
+    done
+}
+
 # Watch for changes and signal restart with debouncing.
 watch_for_changes() {
     local -a watch_dirs
@@ -592,13 +749,19 @@ watch_for_changes() {
 
         log WARNING "Debounce timer finished. Final change was: ${last_event} on ${last_path}${last_file}. Restarting stream..."
         kill_ffmpeg
+        # Re-initialize exclusion list on file system changes as files might have been fixed or replaced.
+        # This prevents permanent exclusion if a problematic file is overwritten.
+		EXCLUDED_VIDEO_FILE_PATH="/data/excluded_videos.txt"
         generate_videolist
         validate_video_files
+        filter_excluded_files # Apply exclusion
         generate_musiclist
+        CURRENTLY_PLAYING_VIDEO_BASENAME=""
         validate_music_files
-        log_total_playlist_duration "${VALIDATED_VIDEO_FILE_LIST}" "Video"
+        log_total_playlist_duration "${FILTERED_VIDEO_FILE_LIST}" "Video" # Log from the filtered list
         [[ "${ENABLE_MUSIC}" == "true" ]] && log_total_playlist_duration "${VALIDATED_MUSIC_FILE_LIST}" "Music"
         start_streaming
+        monitor_for_stall 2>&1 &
     done
 }
 
@@ -609,6 +772,7 @@ main() {
     # Create a named pipe for reliable PID capture and log processing.
     FFMPEG_PIPE=$(mktemp -u)
     mkfifo "${FFMPEG_PIPE}"
+    touch "${NEW_VIDEO_TIMESTAMP_FILE}" # Ensure the timestamp file exists initially
 
     check_dependencies
     check_env_vars
@@ -616,28 +780,40 @@ main() {
     # Use persistent files in the /data volume for the playlists.
     VIDEO_FILE_LIST="/data/videolist.txt"
     VALIDATED_VIDEO_FILE_LIST="/data/validated_videolist.txt"
-    log INFO "Using videolist, which will be available on the host at ./data/videolist.txt"
+    FILTERED_VIDEO_FILE_LIST="/data/filtered_videolist.txt"
+    NEW_VIDEO_TIMESTAMP_FILE="/data/new_video_started.tmp"
+    log INFO "Using videolist ./data/videolist.txt"
+    log INFO "Using validated videolist ./data/validated_videolist.txt"
+    log INFO "Using filtered videolist ./data/filtered_videolist.txt"
 
     if [[ "${ENABLE_MUSIC}" == "true" ]]; then
         MUSIC_FILE_LIST="/data/musiclist.txt"
         VALIDATED_MUSIC_FILE_LIST="/data/validated_musiclist.txt"
-        log INFO "Using musiclist, which will be available on the host at ./data/musiclist.txt"
+        log INFO "Using musiclist ./data/musiclist.txt"
     fi
 
     if [[ "${ENABLE_FFMPEG_LOG_FILE}" == "true" ]]; then
         FFMPEG_LOG_FILE="/data/ffmpeg.log"
-        log WARNING "FFmpeg debug logs will be written to a file, accessible on the host at ./data/ffmpeg.log"
+        log WARNING "FFmpeg debug logs will be written to a file ./data/ffmpeg.log"
         # Overwrite the log file on start to prevent it from growing indefinitely across container restarts.
         > "${FFMPEG_LOG_FILE}"
     fi
     # Initial setup
     generate_videolist
     validate_video_files
+    filter_excluded_files # Apply exclusion for the initial run
     generate_musiclist
     validate_music_files
-    log_total_playlist_duration "${VALIDATED_VIDEO_FILE_LIST}" "Video"
+    log_total_playlist_duration "${FILTERED_VIDEO_FILE_LIST}" "Video" # Log from the filtered list
     [[ "${ENABLE_MUSIC}" == "true" ]] && log_total_playlist_duration "${VALIDATED_MUSIC_FILE_LIST}" "Music"
+    
+    # Start the initial stream.
     start_streaming
+
+    # Launch the stall monitor in the background.
+    monitor_for_stall 2>&1 &
+
+    # Start the file watcher in the foreground. This will block and handle restarts on file changes.
     watch_for_changes
 }
 

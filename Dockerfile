@@ -38,6 +38,8 @@ RUN sed -i 's/ main/ main contrib non-free non-free-firmware/g' /etc/apt/sources
     inotify-tools \
     # bc is used for floating point math in the script
     bc \
+    # progress is used for ffmpeg progress monitoring
+    progress \
     # Timezone data
     tzdata \
     ca-certificates && \

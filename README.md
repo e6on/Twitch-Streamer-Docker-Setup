@@ -7,6 +7,8 @@ A simple, efficient, and Docker-based solution for streaming a playlist of video
 -   **24/7 Streaming:** Automatically finds and streams all videos in a directory, looping them continuously.
 -   **Hardware Accelerated:** Utilizes Intel QSV (VA-API) for efficient video encoding, keeping CPU usage low.
 -   **Dynamic Playlist:** Automatically detects new, deleted, or moved videos and restarts the stream to update the playlist.
+-   **Stall Detection & Auto-Recovery:** Automatically detects if the stream has frozen (e.g., due to a corrupted video file) and restarts FFmpeg to keep the stream online.
+-   **Problematic File Exclusion:** When a stall is detected, the problematic video is automatically added to an exclusion list (`./data/excluded_videos.txt`) to prevent it from disrupting the stream again.
 -   **Dockerized:** Easy to set up and run on any Linux system with Docker and a supported Intel GPU.
 -   **Media Validation:** Automatically validates video and audio tracks to prevent stream freezes from incompatible formats.
 -   **Highly Customizable:** Easily change stream resolution, framerate, bitrates, and ingest server via environment variables.
@@ -164,14 +166,28 @@ You can customize the MUSIC_FILE_TYPES to include other audio formats.
 
 ### Stream Stability and Media Validation
 
-To ensure a stable 24/7 stream, the script automatically validates all media files to prevent freezes caused by incompatible formats, which is especially important for hardware-accelerated encoding. The first valid file in a playlist sets a "gold standard" for properties. Any subsequent files with mismatched properties will be skipped, and a warning will be logged.
+To ensure a stable 24/7 stream, the script uses a two-pronged approach: proactive media validation before streaming begins, and active stall detection during the stream.
 
--   **Video Validation:** All videos are checked for consistent resolution (e.g., `1920x1080`) and pixel format (e.g., `yuv420p`). The framerate is also validated, but with flexibility: videos with a framerate that is an exact multiple of the first video's framerate (e.g., 60fps is accepted if the first is 30fps) are also considered compatible.
+#### Media Pre-Validation
+
+The script automatically validates all media files to prevent freezes caused by incompatible formats, which is especially important for hardware-accelerated encoding. The first valid file in a playlist sets a "gold standard" for properties. Any subsequent files with mismatched properties will be skipped, and a warning will be logged.
+
+-   **Video Validation:** All videos are checked for consistent resolution (e.g., `1920x1080`) and pixel format (e.g., `yuv420p`). The framerate is also validated with flexibility: a video is considered compatible if its framerate is an integer multiple or divisor of the first video's framerate (e.g., 60fps is accepted if the reference is 30fps, and vice-versa).
 -   **Audio Validation:**
     -   When background music is disabled, the audio from your video files is validated for consistent sample rate and channel count.
     -   When background music is enabled, the audio from your music files is validated instead.
 
 This prevents the FFmpeg process from crashing when it encounters a video or audio stream that is different from the one it started with.
+
+#### Stall Detection and Auto-Recovery
+
+Even with validation, some media files can cause the FFmpeg process to stall or freeze without crashing. To combat this, the script includes a robust stall monitor:
+
+-   **Constant Monitoring:** The script periodically checks if FFmpeg is making progress encoding the current video.
+-   **Automatic Restart:** If no progress is detected for a configurable period (defaulting to 60 seconds), the script assumes FFmpeg is stalled. It will then kill the stuck process and restart the stream.
+-   **Automatic File Exclusion:** To prevent a recurrence, the video file that was playing when the stall occurred is automatically added to an exclusion list located at `./data/excluded_videos.txt`. This file persists across container restarts. The stream will then resume, skipping the problematic file.
+
+This combination of pre-validation and active stall detection ensures maximum uptime for your 24/7 stream.
 
 
 ### FFmpeg Log File
