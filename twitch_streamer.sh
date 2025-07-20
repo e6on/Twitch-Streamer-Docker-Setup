@@ -49,6 +49,8 @@ FFMPEG_LOG_FILE=""
 FFMPEG_PID=""
 FFMPEG_PIPE=""
 CURRENTLY_PLAYING_VIDEO_BASENAME=""
+MONITOR_PID=""
+LOG_PROCESSOR_PID=""
 
 # Logging function
 log() {
@@ -71,6 +73,8 @@ log() {
 cleanup() {
     log INFO "Cleaning up and exiting..."
     kill_ffmpeg
+    kill_monitor
+    kill_log_processor
     if [[ -n "${FFMPEG_PIPE:-}" ]] && [[ -p "${FFMPEG_PIPE}" ]]; then
         rm -f "${FFMPEG_PIPE}"
     fi
@@ -463,7 +467,6 @@ filter_excluded_files() {
 
 # Kill FFmpeg process safely
 kill_ffmpeg() {
-    # Fallback: Kill all ffmpeg processes using pidof
     ffmpeg_pids=$(pidof ffmpeg || true)
     if [[ -n "$ffmpeg_pids" ]]; then
         for pid in $ffmpeg_pids; do
@@ -479,6 +482,37 @@ kill_ffmpeg() {
     fi
     FFMPEG_PID=""
 }
+
+# Kill monitor_for_stall process
+kill_monitor() {
+    if [[ -n "${MONITOR_PID}" ]] && kill -0 "${MONITOR_PID}" &>/dev/null; then
+        log WARNING "Killing Stall Monitor process with PID: ${MONITOR_PID}"
+        kill "${MONITOR_PID}" || true
+        sleep 1 # Give it a moment to clean up
+        if kill -0 "${MONITOR_PID}" &>/dev/null; then
+            log WARNING "Stall Monitor PID ${MONITOR_PID} did not terminate. Sending SIGKILL..."
+            kill -9 "${MONITOR_PID}" || true
+        fi
+        wait "${MONITOR_PID}" 2>/dev/null || true
+    fi
+    MONITOR_PID=""
+}
+
+# Kill log processor process
+kill_log_processor() {
+    if [[ -n "${LOG_PROCESSOR_PID}" ]] && kill -0 "${LOG_PROCESSOR_PID}" &>/dev/null; then
+        log WARNING "Killing Log Processor process with PID: ${LOG_PROCESSOR_PID}"
+        kill "${LOG_PROCESSOR_PID}" || true
+        sleep 1 # Give it a moment to clean up
+        if kill -0 "${LOG_PROCESSOR_PID}" &>/dev/null; then
+            log WARNING "Log Processor PID ${LOG_PROCESSOR_PID} did not terminate. Sending SIGKILL..."
+            kill -9 "${LOG_PROCESSOR_PID}" || true
+        fi
+        wait "${LOG_PROCESSOR_PID}" 2>/dev/null || true
+    fi
+    LOG_PROCESSOR_PID=""
+}
+
 
 # Calculates and logs the total duration of a playlist.
 # Arguments:
@@ -613,6 +647,9 @@ start_streaming() {
 
     log INFO "Starting FFmpeg stream..."
 
+    # Kill any existing log processor before starting a new one
+    kill_log_processor
+
     # Start the log processor in the background, reading from our named pipe.
     if [[ "${ENABLE_FFMPEG_LOG_FILE}" == "true" ]]; then
         # If file logging is enabled, tee the output from the pipe to the log file and to the processor.
@@ -621,6 +658,7 @@ start_streaming() {
         # Otherwise, just pipe from the named pipe to the processor.
         <"${FFMPEG_PIPE}" process_ffmpeg_output &
     fi
+    LOG_PROCESSOR_PID=$! # Capture PID of the log processor
 
     # Start ffmpeg, redirect its output to the named pipe, and get its actual PID.
     ffmpeg "${ffmpeg_opts[@]}" >"${FFMPEG_PIPE}" 2>&1 &
@@ -635,6 +673,7 @@ monitor_for_stall() {
     local last_progress_percentage=0.0
     local last_video_start_timestamp=$(stat -c %Y "${NEW_VIDEO_TIMESTAMP_FILE}") # Initialize with current timestamp
     log INFO "Starting FFmpeg stall monitor."
+    # The while loop will continue until the parent script tells it to stop.
     while true; do
         sleep "${STALL_MONITOR_INTERVAL}"
 
@@ -652,13 +691,30 @@ monitor_for_stall() {
             fi
 
             local progress_output
-            progress_output=$(progress -c ffmpeg 2>&1)
+            progress_output=$(progress -c ffmpeg 2>&1 || true) # Add || true to prevent set -e from exiting if progress fails
 
+            local current_progress_percentage="" # Initialize as empty
+            # Check if progress_output indicates ffmpeg is not running (e.g., "No such process" or empty output)
+            if echo "$progress_output" | grep -q "No such process"; then
+                # FFmpeg is not running, so reset stall counter and continue.
+                # log INFO "[Stall Monitor] FFmpeg process not found. Resetting stall counter."
+                stall_counter=0
+                last_progress_percentage=0.0
+                last_video_start_timestamp=$(stat -c %Y "${NEW_VIDEO_TIMESTAMP_FILE}") # Reset timestamp if FFmpeg is not running
+                continue # Skip the rest of the loop and wait for next interval
+            fi
             # log INFO "[Stall Monitor] $progress_output"
 
-            local current_progress_percentage
             # Extract the percentage value. Example: "0.4% (64.0 KiB / 16.3 MiB)" -> "0.4"
             current_progress_percentage=$(echo "$progress_output" | grep -oE '[0-9]+(\.[0-9]+)?%' | head -n 1 | sed 's/%//')
+
+            # Validate that current_progress_percentage is a number before using it in bc
+            if ! [[ "$current_progress_percentage" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+                log WARNING "[Stall Monitor] Invalid progress percentage: '${current_progress_percentage}'. Resetting stall counter."
+                stall_counter=0
+                last_progress_percentage=0.0
+                continue # Skip current progress check as value is invalid
+			fi
 
             # Extract currently playing file from progress output
             local playing_file_from_progress=""
@@ -686,6 +742,9 @@ monitor_for_stall() {
                         log WARNING "Could not identify currently playing file to add to exclusion list."
                     fi
                     kill_ffmpeg
+                    # No need to kill monitor here, as it's the one detecting and initiating restart.
+                    # It will just continue its loop, and the next start_streaming will ensure a clean state.
+                    
                     # Re-generate and validate playlists after updating exclusion list
                     generate_videolist
                     validate_video_files
@@ -704,9 +763,12 @@ monitor_for_stall() {
                 last_progress_percentage=$current_progress_percentage
             fi
         else
+            # FFmpeg process is not running. This condition handles initial startup or if ffmpeg crashed
+            # without the monitor catching it. Reset the stall counter.
             stall_counter=0
             last_progress_percentage=0.0
             last_video_start_timestamp=$(stat -c %Y "${NEW_VIDEO_TIMESTAMP_FILE}") # Reset timestamp if FFmpeg is not running
+            # We don't necessarily restart here; the main loop or watch_for_changes will handle it.
         fi
     done
 }
@@ -749,6 +811,9 @@ watch_for_changes() {
 
         log WARNING "Debounce timer finished. Final change was: ${last_event} on ${last_path}${last_file}. Restarting stream..."
         kill_ffmpeg
+        kill_monitor # Explicitly kill the old monitor process
+        kill_log_processor # Explicitly kill the old log processor process
+
         # Re-initialize exclusion list on file system changes as files might have been fixed or replaced.
         # This prevents permanent exclusion if a problematic file is overwritten.
 		EXCLUDED_VIDEO_FILE_PATH="/data/excluded_videos.txt"
@@ -761,7 +826,8 @@ watch_for_changes() {
         log_total_playlist_duration "${FILTERED_VIDEO_FILE_LIST}" "Video" # Log from the filtered list
         [[ "${ENABLE_MUSIC}" == "true" ]] && log_total_playlist_duration "${VALIDATED_MUSIC_FILE_LIST}" "Music"
         start_streaming
-        monitor_for_stall 2>&1 &
+        monitor_for_stall 2>&1 & # Restart the monitor
+        MONITOR_PID=$! # Capture PID of the new monitor process
     done
 }
 
@@ -812,6 +878,7 @@ main() {
 
     # Launch the stall monitor in the background.
     monitor_for_stall 2>&1 &
+    MONITOR_PID=$! # Capture PID here
 
     # Start the file watcher in the foreground. This will block and handle restarts on file changes.
     watch_for_changes
