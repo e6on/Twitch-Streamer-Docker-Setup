@@ -8,6 +8,7 @@ set -euo pipefail
 readonly GREEN='\033[0;32m'
 readonly YELLOW='\033[1;33m'
 readonly RED='\033[0;31m'
+readonly CYAN='\033[0;36m'
 readonly NC='\033[0m' # No Color
 
 # Time to wait after a file change before restarting, to batch multiple changes.
@@ -36,6 +37,8 @@ readonly MUSIC_FILE_TYPES=${MUSIC_FILE_TYPES:-"mp3 flac wav ogg"} # Space-separa
 readonly ENABLE_MUSIC=${ENABLE_MUSIC:-"false"}
 readonly ENABLE_FFMPEG_LOG_FILE=${ENABLE_FFMPEG_LOG_FILE:-"false"}
 readonly MUSIC_VOLUME=${MUSIC_VOLUME:-"1.0"} # Music volume. 1.0 is 100%, 0.5 is 50%.
+readonly ENABLE_SCRIPT_LOG_FILE=${ENABLE_SCRIPT_LOG_FILE:-"false"}
+readonly SCRIPT_LOG_FILE=${SCRIPT_LOG_FILE:-"/data/script_warnings_errors.log"}
 
 # --- Global Variables ---
 VIDEO_FILE_LIST=""
@@ -51,6 +54,8 @@ FFMPEG_PIPE=""
 CURRENTLY_PLAYING_VIDEO_BASENAME=""
 MONITOR_PID=""
 LOG_PROCESSOR_PID=""
+PLAYLIST_LOOP_COUNT=0
+FIRST_VIDEO_FILE=""
 
 # Logging function
 log() {
@@ -62,11 +67,20 @@ log() {
 
     case "$level" in
         INFO) color="${GREEN}" ;;
+        MUSIC) color="${GREEN}" ;;
         WARNING) color="${YELLOW}" ;;
+        VIDEO) color="${CYAN}" ;;
         ERROR) color="${RED}" ;;
     esac
     # Log to stderr to not interfere with other command outputs.
     >&2 echo -e "${color}${timestamp} [${level}] ${message}${NC}"
+
+    if [[ "${ENABLE_SCRIPT_LOG_FILE}" == "true" ]]; then
+        if [[ "$level" == "WARNING" ]] || [[ "$level" == "ERROR" ]] || [[ "$level" == "VIDEO" ]]; then
+            # Write uncolored message to the log file.
+            echo "${timestamp} [${level}] ${message}" >> "${SCRIPT_LOG_FILE}"
+        fi
+    fi
 }
 
 # Cleanup function to be called on script exit.
@@ -328,6 +342,7 @@ validate_video_files() {
             reference_pix_fmt="${current_pix_fmt}"
             reference_frame_rate="${current_frame_rate}"
             reference_file="$(basename "${current_file}")"
+            FIRST_VIDEO_FILE="${reference_file}"
             local ref_log_msg="Video compatibility reference set by '${reference_file}': Resolution=${reference_width}x${reference_height}, PixelFormat=${reference_pix_fmt}, FrameRate=${reference_frame_rate}"
 
             if [[ "$validate_audio" == "true" ]]; then
@@ -523,6 +538,7 @@ log_total_playlist_duration() {
     local media_type="$2"
     # Use scale=4 for bc to handle floating point numbers from ffprobe.
     local total_duration_seconds="0.0"
+    local file_count=0
 
     if [[ ! -s "${playlist_file}" ]]; then
         # This is not an error, just means an empty playlist.
@@ -546,17 +562,21 @@ log_total_playlist_duration() {
             continue
         fi
         total_duration_seconds=$(echo "scale=4; ${total_duration_seconds} + ${duration}" | bc)
+        file_count=`expr $file_count + 1`
     done < "${playlist_file}"
 
     # Format the duration into Dd HH:MM:SS
     if (( $(echo "${total_duration_seconds} > 0" | bc -l) )); then
         local total_seconds_int
         total_seconds_int=$(printf "%.0f" "${total_duration_seconds}")
-        local days=$((total_seconds_int / 86400)); local hours=$(((total_seconds_int % 86400) / 3600)); local minutes=$(((total_seconds_int % 3600) / 60)); local seconds=$((total_seconds_int % 60))
+        local days=$((total_seconds_int / 86400))
+        local hours=$(((total_seconds_int % 86400) / 3600))
+        local minutes=$(((total_seconds_int % 3600) / 60))
+        local seconds=$((total_seconds_int % 60))
         local formatted_duration=""
         if (( days > 0 )); then formatted_duration+="${days}d "; fi
         formatted_duration+=$(printf "%02d:%02d:%02d" "${hours}" "${minutes}" "${seconds}")
-        log INFO "Total ${media_type} playlist duration: ${YELLOW}${formatted_duration}${NC}"
+        log INFO "Total ${media_type} playlist duration: ${YELLOW}${formatted_duration}${NC} (${file_count} files)"
     fi
 }
 
@@ -571,12 +591,16 @@ process_ffmpeg_output() {
         if [[ "$line" =~ \[(concat|AVFormatContext).*\]\ Opening\ \'(.+)\'\ for\ reading ]]; then
             local playing_file="${BASH_REMATCH[2]}"
             if [[ "$playing_file" == "${VIDEO_DIR}"* ]]; then
-                log INFO "Now Playing Video: $(basename "${playing_file}")"
+                log VIDEO "Now Playing Video: $(basename "${playing_file}")"
                 CURRENTLY_PLAYING_VIDEO_BASENAME="$(basename "${playing_file}")"
+                if [[ "$FIRST_VIDEO_FILE" == "$CURRENTLY_PLAYING_VIDEO_BASENAME" ]]; then
+                    PLAYLIST_LOOP_COUNT=`expr $PLAYLIST_LOOP_COUNT + 1`
+                    log VIDEO "Playlist loop count: $PLAYLIST_LOOP_COUNT"
+                fi
                 # Signal that a new video has started playing
                 touch "${NEW_VIDEO_TIMESTAMP_FILE}"
             elif [[ "${ENABLE_MUSIC}" == "true" && "$playing_file" == "${MUSIC_DIR}"* ]]; then
-                log INFO "Now Playing Music: $(basename "${playing_file}")"
+                log MUSIC "Now Playing Music: $(basename "${playing_file}")"
             fi
         fi
     done
@@ -732,6 +756,7 @@ monitor_for_stall() {
             if (( $(echo "$current_progress_percentage <= $last_progress_percentage" | bc -l) )); then
                 ((stall_counter++))
                 log WARNING "[Stall Monitor] FFmpeg is not playing. Counter: ${stall_counter}/${STALL_THRESHOLD}."
+                log WARNING "[Stall Monitor] $progress_output"
                 if (( stall_counter >= STALL_THRESHOLD )); then
                     log ERROR "FFmpeg appears to be stalled. Restarting stream..."
                     log WARNING "Last played file was: '${CURRENTLY_PLAYING_VIDEO_BASENAME}'."
@@ -763,12 +788,16 @@ monitor_for_stall() {
                 last_progress_percentage=$current_progress_percentage
             fi
         else
-            # FFmpeg process is not running. This condition handles initial startup or if ffmpeg crashed
-            # without the monitor catching it. Reset the stall counter.
+            # FFmpeg process is not running. This could be due to a crash or failure to start.
+            log ERROR "[Stall Monitor] FFmpeg process with PID ${FFMPEG_PID:-not set} is not running. Attempting to restart the stream..."
+            # Attempt to restart the stream. We don't need to kill ffmpeg since it's already gone.
+            # We also don't re-generate playlists here, as the crash might be unrelated to a specific file.
+            # If a file is truly problematic, it will likely cause a stall eventually, which has its own recovery logic.
+            start_streaming
+            # Reset monitor state after restart attempt.
             stall_counter=0
             last_progress_percentage=0.0
-            last_video_start_timestamp=$(stat -c %Y "${NEW_VIDEO_TIMESTAMP_FILE}") # Reset timestamp if FFmpeg is not running
-            # We don't necessarily restart here; the main loop or watch_for_changes will handle it.
+            last_video_start_timestamp=$(stat -c %Y "${NEW_VIDEO_TIMESTAMP_FILE}") # Reset timestamp after restart
         fi
     done
 }
@@ -816,7 +845,6 @@ watch_for_changes() {
 
         # Re-initialize exclusion list on file system changes as files might have been fixed or replaced.
         # This prevents permanent exclusion if a problematic file is overwritten.
-		EXCLUDED_VIDEO_FILE_PATH="/data/excluded_videos.txt"
         generate_videolist
         validate_video_files
         filter_excluded_files # Apply exclusion
@@ -863,6 +891,12 @@ main() {
         log WARNING "FFmpeg debug logs will be written to a file ./data/ffmpeg.log"
         # Overwrite the log file on start to prevent it from growing indefinitely across container restarts.
         > "${FFMPEG_LOG_FILE}"
+    fi
+
+    if [[ "${ENABLE_SCRIPT_LOG_FILE}" == "true" ]]; then
+        log WARNING "Script WARNING and ERROR logs will be written to ${SCRIPT_LOG_FILE}"
+        # Overwrite the log file on start to prevent it from growing indefinitely across container restarts.
+        > "${SCRIPT_LOG_FILE}"
     fi
     # Initial setup
     generate_videolist

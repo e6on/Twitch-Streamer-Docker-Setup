@@ -40,6 +40,11 @@ services:
       # the full, verbose FFmpeg debug output to a file at ./data/ffmpeg.log.
       # This is useful for troubleshooting but can create large log files.
       # - ENABLE_FFMPEG_LOG_FILE=true
+      # --- Optional Script Event Logging ---
+      # Uncomment to save WARNING and ERROR level script messages to a log file.
+      # This is useful for reviewing issues without having to parse the main container log.
+      - ENABLE_SCRIPT_LOG_FILE=true
+      # - SCRIPT_LOG_FILE=/data/script_warnings_errors.log # Optional: customize log file path
       # --- Optional Ingest Server ---
       # For best results, choose a server close to you from https://help.twitch.tv/s/twitch-ingest-recommendation
       - TWITCH_INGEST_URL=rtmp://hel03.contribute.live-video.net/app/ # Europe: Finland, Helsinki
