@@ -8,7 +8,7 @@ set -euo pipefail
 readonly GREEN='\033[0;32m'
 readonly YELLOW='\033[1;33m'
 readonly RED='\033[0;31m'
-readonly CYAN='\033[0;36m'
+readonly CYAN='\033[1;36m'
 readonly NC='\033[0m' # No Color
 
 # Time to wait after a file change before restarting, to batch multiple changes.
@@ -56,6 +56,8 @@ MONITOR_PID=""
 LOG_PROCESSOR_PID=""
 PLAYLIST_LOOP_COUNT=0
 FIRST_VIDEO_FILE=""
+VIDEO_DURATION=""
+VIDEO_FILE_COUNT=0
 
 # Logging function
 log() {
@@ -496,6 +498,7 @@ kill_ffmpeg() {
         done
     fi
     FFMPEG_PID=""
+    PLAYLIST_LOOP_COUNT=0
 }
 
 # Kill monitor_for_stall process
@@ -575,8 +578,12 @@ log_total_playlist_duration() {
         local seconds=$((total_seconds_int % 60))
         local formatted_duration=""
         if (( days > 0 )); then formatted_duration+="${days}d "; fi
-        formatted_duration+=$(printf "%02d:%02d:%02d" "${hours}" "${minutes}" "${seconds}")
+        formatted_duration+=$(printf "%02dh:%02dm:%02ds" "${hours}" "${minutes}" "${seconds}")
         log INFO "Total ${media_type} playlist duration: ${YELLOW}${formatted_duration}${NC} (${file_count} files)"
+        if [[ "$media_type" == "Video" ]]; then
+            VIDEO_DURATION="${formatted_duration}"
+            VIDEO_FILE_COUNT=$file_count
+        fi
     fi
 }
 
@@ -595,7 +602,7 @@ process_ffmpeg_output() {
                 CURRENTLY_PLAYING_VIDEO_BASENAME="$(basename "${playing_file}")"
                 if [[ "$FIRST_VIDEO_FILE" == "$CURRENTLY_PLAYING_VIDEO_BASENAME" ]]; then
                     PLAYLIST_LOOP_COUNT=`expr $PLAYLIST_LOOP_COUNT + 1`
-                    log VIDEO "Playlist loop count: $PLAYLIST_LOOP_COUNT"
+                    log VIDEO "Playlist loop count: $PLAYLIST_LOOP_COUNT ($VIDEO_DURATION - $VIDEO_FILE_COUNT files)."
                 fi
                 # Signal that a new video has started playing
                 touch "${NEW_VIDEO_TIMESTAMP_FILE}"
