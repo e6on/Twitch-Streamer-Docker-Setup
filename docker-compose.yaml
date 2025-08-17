@@ -29,6 +29,8 @@ services:
       - VIDEO_BITRATE=2500k
       # - AUDIO_BITRATE=160k
       - VIDEO_FILE_TYPES="mp4 mkv mpg mov" # Space-separated list of file extensions
+      # --- Enable Video Shuffle Mode ---
+      - ENABLE_SHUFFLE=true
       # --- Optional Background Music ---
       # Uncomment to enable a separate, continuously looping music track over your videos.
       - ENABLE_MUSIC=true

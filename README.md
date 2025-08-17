@@ -205,6 +205,19 @@ For advanced troubleshooting, you can enable a separate, verbose log file for FF
 - ENABLE_FFMPEG_LOG_FILE=true
 ```
 
+### Script Event Logging
+
+In addition to the main container log, you can save important script events (warnings, errors, video changes) to a separate log file. This is useful for reviewing issues without parsing the full container log.
+
+```yaml
+# docker-compose.yaml
+# --- Optional Script Event Logging ---
+# Uncomment to save WARNING and ERROR level script messages to a log file.
+# This is useful for reviewing issues without having to parse the main container log.
+- ENABLE_SCRIPT_LOG_FILE=true
+# - SCRIPT_LOG_FILE=/data/script_warnings_errors.log # Optional: customize log file path
+```
+
 ## Verifying Hardware Acceleration
 
 To confirm that Intel QSV hardware acceleration is being used, check the container logs for FFmpeg's initialization output.
