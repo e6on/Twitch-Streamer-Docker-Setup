@@ -16,10 +16,10 @@ readonly RESTART_DEBOUNCE_SECONDS=5
 
 # --- Stall Detection Configuration ---
 # How often (in seconds) to check if ffmpeg is stalled.
-readonly STALL_MONITOR_INTERVAL=15
+readonly STALL_MONITOR_INTERVAL=${STALL_MONITOR_INTERVAL:-15}
 # How many times the speed must be 0/s before we declare it stalled and restart.
 # (e.g., 4 * 15s = 60 seconds of zero activity before restart).
-readonly STALL_THRESHOLD=4
+readonly STALL_THRESHOLD=${STALL_THRESHOLD:-4}
 
 # --- Stream Configuration (can be overridden by environment variables) ---
 readonly STREAM_RESOLUTION=${STREAM_RESOLUTION:-"960x540"}
@@ -35,6 +35,7 @@ readonly MUSIC_FILE_TYPES=${MUSIC_FILE_TYPES:-"mp3 flac wav ogg"} # Space-separa
 
 # --- Music & Feature Flags ---
 readonly ENABLE_MUSIC=${ENABLE_MUSIC:-"false"}
+readonly ENABLE_SHUFFLE=${ENABLE_SHUFFLE:-"false"}
 readonly ENABLE_FFMPEG_LOG_FILE=${ENABLE_FFMPEG_LOG_FILE:-"false"}
 readonly MUSIC_VOLUME=${MUSIC_VOLUME:-"1.0"} # Music volume. 1.0 is 100%, 0.5 is 50%.
 readonly ENABLE_SCRIPT_LOG_FILE=${ENABLE_SCRIPT_LOG_FILE:-"false"}
@@ -47,6 +48,7 @@ validated_video_file_list=""
 validated_music_file_list=""
 filtered_video_file_list=""
 excluded_video_file_path="/data/excluded_videos.txt"
+premature_loop_signal_file="/data/premature_loop.signal"
 new_video_timestamp_file="/data/new_video_started.tmp"
 ffmpeg_log_file=""
 ffmpeg_pid=""
@@ -98,6 +100,8 @@ cleanup() {
     if [[ -n "${progress_pipe:-}" ]] && [[ -p "${progress_pipe}" ]]; then
         rm -f "${progress_pipe}"
     fi
+    if [[ -f "${premature_loop_signal_file:-}" ]]; then rm -f "${premature_loop_signal_file}"; fi
+    if [[ -f "${premature_loop_signal_file:-}.tmp" ]]; then rm -f "${premature_loop_signal_file}.tmp"; fi
 }
 
 # Check for required commands.
@@ -201,8 +205,17 @@ generate_playlist() {
     done
     find_args+=(\)) # Close the expression group
 
+    local sort_or_shuffle_cmd
+    if [[ "${media_type}" == "Video" && "${ENABLE_SHUFFLE}" == "true" ]]; then
+        log INFO "Shuffle mode is enabled for videos."
+        sort_or_shuffle_cmd=(shuf -z)
+    else
+        sort_or_shuffle_cmd=(sort -z)
+    fi
+
     # Use find -print0 and read -d '' to robustly handle filenames with special characters.
-    { find "${find_args[@]}" -print0 | sort -z | while IFS= read -r -d '' file; do echo "file '$file'"; done; } > "${output_file}"
+    #{ find "${find_args[@]}" -print0 | sort -z | while IFS= read -r -d '' file; do echo "file '$file'"; done; } > "${output_file}"
+    { find "${find_args[@]}" -print0 | "${sort_or_shuffle_cmd[@]}" | while IFS= read -r -d '' file; do echo "file '$file'"; done; } > "${output_file}"
     log INFO "${media_type} file list generated at ${output_file}"
 }
 
@@ -645,6 +658,7 @@ log_total_playlist_duration() {
 
 # Process FFmpeg's stderr to log currently playing files.
 process_ffmpeg_output() {
+    local previous_video_basename=""
     # This function reads from FFmpeg's stderr line by line.
     while IFS= read -r line; do
         # Check if the line indicates a new file is being opened. FFmpeg logs this differently
@@ -656,15 +670,27 @@ process_ffmpeg_output() {
             if [[ "$playing_file" == "${VIDEO_DIR}"* ]]; then
                 currently_playing_video_basename="$(basename "${playing_file}")"
                 if [[ "$FIRST_VIDEO_FILE" == "$currently_playing_video_basename" ]]; then
+                    # A loop has occurred. Check if the previous loop completed fully.
+                    # We check playlist_loop_count > 0 to avoid a false positive on the very first video.
+                    if [[ "$playlist_loop_count" -gt 0 && "$current_video_index" -lt "$video_file_count" ]]; then
+                        log ERROR "Premature playlist loop detected after '${previous_video_basename}'. The file is likely corrupt."
+                        # Signal the monitor to restart and exclude the problematic file.
+                        # Use a temp file and rename for an atomic operation to avoid race conditions with the monitor.
+                        echo "${previous_video_basename}" > "${premature_loop_signal_file}.tmp" && mv "${premature_loop_signal_file}.tmp" "${premature_loop_signal_file}"
+                    fi
+
                     let "playlist_loop_count+=1"
                     current_video_index=1 # Reset for new loop
                     log VIDEO "Playlist loop $playlist_loop_count ($video_duration - $video_file_count files)."
+
                 else
                     let "current_video_index+=1"
                 fi
 				log VIDEO "Now Playing $playlist_loop_count [$current_video_index/$video_file_count]: $(basename "${playing_file}")"
                 # Signal that a new video has started playing
                 touch "${new_video_timestamp_file}"
+                # Store the current video as the "previous" one for the next iteration.
+                previous_video_basename="${currently_playing_video_basename}"
             elif [[ "${ENABLE_MUSIC}" == "true" && "$playing_file" == "${MUSIC_DIR}"* ]]; then
                 log MUSIC "Now Playing: $(basename "${playing_file}")"
             fi
@@ -768,35 +794,48 @@ monitor_for_stall() {
     # We will loop continuously and read from the progress pipe.
     # `read -r -t` is used to implement a timeout.
     while true; do
-        local key_value_pair=""
-        if ! read -r -t "${STALL_MONITOR_INTERVAL}" key_value_pair < "${progress_pipe}"; then
-            local read_status=$?
-            if [[ ${read_status} -eq 1 ]]; then
-                # read timed out (no new data)
-                log WARNING "[Stall Monitor] No progress update received for ${STALL_MONITOR_INTERVAL}s. Checking FFmpeg status..."
-                if [[ -n "${ffmpeg_pid}" ]] && kill -0 "${ffmpeg_pid}" &>/dev/null; then
-                    # The process is still alive but not making progress. This is a stall.
-                    let "stall_counter+=1"
-                    log WARNING "[Stall Monitor] FFmpeg is still running but silent. Counter: ${stall_counter}/${STALL_THRESHOLD}."
-                    if (( stall_counter >= STALL_THRESHOLD )); then
-                        log ERROR "FFmpeg appears to be stalled (silent). Restarting stream..."
-                        restart_stream "hard" # No file to exclude, but still a hard restart to re-validate.
-                        stall_counter=0
-                        last_video_start_timestamp=$(stat -c %Y "${new_video_timestamp_file}")
-                    fi
-                else
-                    # The process has died.
-                    log ERROR "[Stall Monitor] FFmpeg process is not running. Attempting to restart the stream..."
-                    restart_stream "soft"
+        # Check for a premature loop signal, which indicates a corrupt file.
+        if [[ -f "${premature_loop_signal_file}" ]]; then
+            local bad_file
+            bad_file=$(<"${premature_loop_signal_file}")
+            log ERROR "[Stall Monitor] Premature loop signal detected. Excluding '${bad_file}' and restarting."
+            rm -f "${premature_loop_signal_file}"
+            restart_stream "hard" "${bad_file}"
+            continue # Restart the monitor's loop
+        fi
+
+        local key_value_pair="" read_status
+        read -r -t "${STALL_MONITOR_INTERVAL}" key_value_pair < "${progress_pipe}"
+        read_status=$?
+
+        if [[ ${read_status} -eq 0 ]]; then
+            # Read was successful, continue processing.
+            : # No-op, fall through to the processing logic below.
+        elif [[ ${read_status} -gt 128 ]]; then
+            # A timeout occurred, which is the primary indicator of a stall.
+            log WARNING "[Stall Monitor] No progress update received for ${STALL_MONITOR_INTERVAL}s. Checking FFmpeg status..."
+            if [[ -n "${ffmpeg_pid}" ]] && kill -0 "${ffmpeg_pid}" &>/dev/null; then
+                # The process is still alive but not making progress. This is a stall.
+                let "stall_counter+=1"
+                log WARNING "[Stall Monitor] FFmpeg is still running but silent. Counter: ${stall_counter}/${STALL_THRESHOLD}."
+                if (( stall_counter >= STALL_THRESHOLD )); then
+                    log ERROR "FFmpeg appears to be stalled (silent). Restarting stream..."
+                    restart_stream "hard" # No specific file to exclude, but still a hard restart.
                     stall_counter=0
                     last_video_start_timestamp=$(stat -c %Y "${new_video_timestamp_file}")
                 fi
             else
-                # Pipe closed unexpectedly.
-                log ERROR "[Stall Monitor] Progress pipe closed unexpectedly. Exiting monitor loop."
-                break
+                # The process has died unexpectedly.
+                log ERROR "[Stall Monitor] FFmpeg process is not running. Attempting to restart the stream..."
+                restart_stream "soft" # Soft restart as the cause is unknown.
+                stall_counter=0
+                last_video_start_timestamp=$(stat -c %Y "${new_video_timestamp_file}")
             fi
-            continue
+            continue # Skip the regular progress processing below.
+        else
+            # An exit code of 1 means EOF (pipe closed by the writer). Other non-zero codes are errors.
+            log ERROR "[Stall Monitor] Progress pipe read failed (status: ${read_status}). This likely means FFmpeg exited. Exiting monitor."
+            break # Exit the monitor loop.
         fi
 
         # Reset stall counter on any progress update
@@ -898,6 +937,8 @@ main() {
     mkfifo "${progress_pipe}"
 
     touch "${new_video_timestamp_file}" # Ensure the timestamp file exists initially
+    rm -f "${premature_loop_signal_file}" # Ensure no stale signal file exists on start
+    rm -f "${premature_loop_signal_file}.tmp" # Ensure no stale temp signal file exists on start
 
     check_dependencies
     check_env_vars
