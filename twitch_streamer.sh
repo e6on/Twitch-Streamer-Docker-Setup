@@ -36,6 +36,7 @@ readonly MUSIC_FILE_TYPES=${MUSIC_FILE_TYPES:-"mp3 flac wav ogg"} # Space-separa
 # --- Music & Feature Flags ---
 readonly ENABLE_MUSIC=${ENABLE_MUSIC:-"false"}
 readonly ENABLE_SHUFFLE=${ENABLE_SHUFFLE:-"false"}
+readonly RESHUFFLE_ON_LOOP=${RESHUFFLE_ON_LOOP:-"false"}
 readonly ENABLE_FFMPEG_LOG_FILE=${ENABLE_FFMPEG_LOG_FILE:-"false"}
 readonly MUSIC_VOLUME=${MUSIC_VOLUME:-"1.0"} # Music volume. 1.0 is 100%, 0.5 is 50%.
 readonly ENABLE_SCRIPT_LOG_FILE=${ENABLE_SCRIPT_LOG_FILE:-"false"}
@@ -48,6 +49,7 @@ validated_video_file_list=""
 validated_music_file_list=""
 filtered_video_file_list=""
 excluded_video_file_path="/data/excluded_videos.txt"
+reshuffle_signal_file="/data/reshuffle.signal"
 premature_loop_signal_file="/data/premature_loop.signal"
 new_video_timestamp_file="/data/new_video_started.tmp"
 ffmpeg_log_file=""
@@ -102,6 +104,8 @@ cleanup() {
     fi
     if [[ -f "${premature_loop_signal_file:-}" ]]; then rm -f "${premature_loop_signal_file}"; fi
     if [[ -f "${premature_loop_signal_file:-}.tmp" ]]; then rm -f "${premature_loop_signal_file}.tmp"; fi
+    if [[ -f "${reshuffle_signal_file:-}" ]]; then rm -f "${reshuffle_signal_file}"; fi
+    if [[ -f "${reshuffle_signal_file:-}.tmp" ]]; then rm -f "${reshuffle_signal_file}.tmp"; fi
 }
 
 # Check for required commands.
@@ -670,8 +674,19 @@ process_ffmpeg_output() {
             if [[ "$playing_file" == "${VIDEO_DIR}"* ]]; then
                 currently_playing_video_basename="$(basename "${playing_file}")"
                 if [[ "$FIRST_VIDEO_FILE" == "$currently_playing_video_basename" ]]; then
-                    # A loop has occurred. Check if the previous loop completed fully.
+                    # A loop has occurred.
+                    # Check for RESHUFFLE_ON_LOOP first.
                     # We check playlist_loop_count > 0 to avoid a false positive on the very first video.
+                    if [[ "${ENABLE_SHUFFLE}" == "true" && "${RESHUFFLE_ON_LOOP}" == "true" && "$playlist_loop_count" -gt 0 ]]; then
+                        log WARNING "Playlist has looped. Triggering reshuffle as RESHUFFLE_ON_LOOP is enabled."
+                        # Signal the monitor to perform a hard restart, which will regenerate the shuffled playlist.
+                        # Use atomic move to create signal file.
+                        touch "${reshuffle_signal_file}.tmp" && mv "${reshuffle_signal_file}.tmp" "${reshuffle_signal_file}"
+                        # The monitor will kill this process soon. Exit the function.
+                        return
+                    fi
+
+                    # Check if the previous loop completed fully.
                     if [[ "$playlist_loop_count" -gt 0 && "$current_video_index" -lt "$video_file_count" ]]; then
                         log ERROR "Premature playlist loop detected after '${previous_video_basename}'. The file is likely corrupt."
                         # Signal the monitor to restart and exclude the problematic file.
@@ -794,6 +809,14 @@ monitor_for_stall() {
     # We will loop continuously and read from the progress pipe.
     # `read -r -t` is used to implement a timeout.
     while true; do
+        # Check for a reshuffle signal.
+        if [[ -f "${reshuffle_signal_file}" ]]; then
+            log INFO "[Stall Monitor] Reshuffle signal detected. Restarting stream to reshuffle playlist."
+            rm -f "${reshuffle_signal_file}"
+            restart_stream "hard" # A hard restart will re-run generate_playlist which will shuffle
+            continue # Restart the monitor's loop
+        fi
+
         # Check for a premature loop signal, which indicates a corrupt file.
         if [[ -f "${premature_loop_signal_file}" ]]; then
             local bad_file
@@ -939,6 +962,8 @@ main() {
     touch "${new_video_timestamp_file}" # Ensure the timestamp file exists initially
     rm -f "${premature_loop_signal_file}" # Ensure no stale signal file exists on start
     rm -f "${premature_loop_signal_file}.tmp" # Ensure no stale temp signal file exists on start
+    rm -f "${reshuffle_signal_file}" # Ensure no stale signal file exists on start
+    rm -f "${reshuffle_signal_file}.tmp" # Ensure no stale temp signal file exists on start
 
     check_dependencies
     check_env_vars

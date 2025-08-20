@@ -31,11 +31,11 @@ services:
       - VIDEO_FILE_TYPES="mp4 mkv mpg mov" # Space-separated list of file extensions
       # --- Enable Video Shuffle Mode ---
       - ENABLE_SHUFFLE=true
+      - RESHUFFLE_ON_LOOP=true
       # --- Stall Monitor Test Settings (Optional) ---
       # Lower these values to test the stall monitor more quickly.
-      - STALL_MONITOR_INTERVAL=3 # Check every 3 seconds
-      - STALL_THRESHOLD=3        # Restart after 3 failed checks (9 seconds total)
-      # - RESHUFFLE_ON_LOOP=true # This feature is not currently implemented.
+      #- STALL_MONITOR_INTERVAL=3 # Check every 3 seconds
+      #- STALL_THRESHOLD=3        # Restart after 3 failed checks (9 seconds total)
       # --- Optional Background Music ---
       # Uncomment to enable a separate, continuously looping music track over your videos.
       - ENABLE_MUSIC=true

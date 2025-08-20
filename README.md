@@ -13,6 +13,7 @@ A simple, efficient, and Docker-based solution for streaming a playlist of video
 -   **Media Validation:** Automatically validates video and audio tracks to prevent stream freezes from incompatible formats.
 -   **Highly Customizable:** Easily change stream resolution, framerate, bitrates, and ingest server via environment variables.
 -   **Persistent Playlist:** The generated playlist is stored in the `./data` volume for easy inspection.
+-   **Shuffle Modes:** Supports shuffling the video playlist on startup and optionally reshuffling every time the playlist loops.
 -   **Optional Background Music:** Replace the original video audio with a separate, continuously looping playlist of your own music.
 
 You can use ready made Docker image from here https://hub.docker.com/r/e6on/twitch-streamer or make your own.
@@ -137,10 +138,28 @@ Uncomment and modify these variables to change the output stream quality. The de
 You can control which video file types are included in the stream by setting the `VIDEO_FILE_TYPES` environment variable in `docker-compose.yaml`. Provide a space-separated list of extensions.
 
 ```yaml
-# `docker-compose.yaml
-# --- Optional Stream Quality Settings ---
-- VIDEO_FILE_TYPES="mp4 mkv avi mov" # Space-separated list of file extensions
+# docker-compose.yaml
+- VIDEO_FILE_TYPES="mp4 mkv mpg mov" # Space-separated list of file extensions
 ```
+### Shuffle Modes
+
+Control the order of your video playlist with shuffle options. This is useful for creating a less predictable viewing experience, especially for 24/7 streams.
+
+```yaml
+# docker-compose.yaml
+# --- Enable Video Shuffle Mode ---
+- ENABLE_SHUFFLE=true
+- RESHUFFLE_ON_LOOP=true
+```
+
+-   **ENABLE_SHUFFLE:**
+    -   true: Randomizes the order of videos in your playlist when the stream first starts. The playlist is also re-shuffled automatically whenever you add, remove, or rename files in the videos directory.
+    -   false (default): Videos are played in alphanumeric order.
+
+-   **RESHUFFLE_ON_LOOP:**
+    -   true: After the entire playlist has been played through once, it will be re-shuffled into a new random order for the next loop. This ensures the viewing experience remains fresh over long periods.
+    -   Note: This setting only has an effect if ENABLE_SHUFFLE is also set to true.
+    -   false (default): The shuffled playlist will loop with the same order until the stream is restarted (e.g., by a file change).
 
 ### Background Music
 
