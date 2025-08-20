@@ -152,11 +152,11 @@ Control the order of your video playlist with shuffle options. This is useful fo
 - RESHUFFLE_ON_LOOP=true
 ```
 
--   **ENABLE_SHUFFLE:**
+-   **`ENABLE_SHUFFLE`:**
     -   `true`: Randomizes the order of videos in your playlist when the stream first starts. The playlist is also re-shuffled automatically whenever you add, remove, or rename files in the videos directory.
     -   `false` (default): Videos are played in alphanumeric order.
 
--   **RESHUFFLE_ON_LOOP:**
+-   **`RESHUFFLE_ON_LOOP`:**
     -   `true`: After the entire playlist has been played through once, it will be re-shuffled into a new random order for the next loop. This ensures the viewing experience remains fresh over long periods.
     -   Note: This setting only has an effect if ENABLE_SHUFFLE is also set to true.
     -   `false` (default): The shuffled playlist will loop with the same order until the stream is restarted (e.g., by a file change).
