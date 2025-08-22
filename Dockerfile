@@ -9,6 +9,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends xz-utils
 # Copy and extract the ffmpeg archive
 COPY ffmpeg-6.1.2-linux-amd64.tar.xz /tmp/
 RUN tar -xf /tmp/ffmpeg-6.1.2-linux-amd64.tar.xz -C /usr/local --strip-components=1
+#COPY ffmpeg-7.0.2-linux-amd64.tar.xz /tmp/
+#RUN tar -xf /tmp/ffmpeg-7.0.2-linux-amd64.tar.xz -C /usr/local --strip-components=1
 
 
 # --- Final Stage ---

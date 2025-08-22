@@ -39,6 +39,7 @@ readonly ENABLE_SHUFFLE=${ENABLE_SHUFFLE:-"false"}
 readonly RESHUFFLE_ON_LOOP=${RESHUFFLE_ON_LOOP:-"false"}
 readonly ENABLE_FFMPEG_LOG_FILE=${ENABLE_FFMPEG_LOG_FILE:-"false"}
 readonly MUSIC_VOLUME=${MUSIC_VOLUME:-"1.0"} # Music volume. 1.0 is 100%, 0.5 is 50%.
+readonly DISABLE_FPS_VALIDATION=${DISABLE_FPS_VALIDATION:-"false"}
 readonly ENABLE_SCRIPT_LOG_FILE=${ENABLE_SCRIPT_LOG_FILE:-"false"}
 readonly script_log_file=${script_log_file:-"/data/script_warnings_errors.log"}
 
@@ -121,37 +122,18 @@ check_dependencies() {
 
 # Check required environment variables.
 check_env_vars() {
+    local var
     log INFO "Checking for required environment variables..."
-    if [[ -z "${VIDEO_DIR:-}" ]]; then
-        log ERROR "Required environment variable VIDEO_DIR is not set."
-        exit 1
-    fi
+
+    for var in VIDEO_DIR TWITCH_STREAM_KEY STREAM_RESOLUTION STREAM_FRAMERATE VIDEO_BITRATE AUDIO_BITRATE VIDEO_FILE_TYPES; do
+        if [[ -z "${!var:-}" ]]; then
+            log ERROR "Required environment variable ${var} is not set."
+            exit 1
+        fi
+    done
+
     if [[ ! -d "${VIDEO_DIR}" ]]; then
         log ERROR "VIDEO_DIR (${VIDEO_DIR}) is not a valid directory."
-        exit 1
-    fi
-    if [[ -z "${TWITCH_STREAM_KEY:-}" ]]; then
-        log ERROR "Required environment variable TWITCH_STREAM_KEY is not set."
-        exit 1
-    fi
-    if [[ -z "${STREAM_RESOLUTION:-}" ]]; then
-        log ERROR "Required environment variable STREAM_RESOLUTION is not set."
-        exit 1
-    fi
-    if [[ -z "${STREAM_FRAMERATE:-}" ]]; then
-        log ERROR "Required environment variable STREAM_FRAMERATE is not set."
-        exit 1
-    fi
-    if [[ -z "${VIDEO_BITRATE:-}" ]]; then
-        log ERROR "Required environment variable VIDEO_BITRATE is not set."
-        exit 1
-    fi
-    if [[ -z "${AUDIO_BITRATE:-}" ]]; then
-        log ERROR "Required environment variable AUDIO_BITRATE is not set."
-        exit 1
-    fi
-    if [[ -z "${VIDEO_FILE_TYPES:-}" ]]; then
-        log ERROR "Required environment variable VIDEO_FILE_TYPES is not set."
         exit 1
     fi
 
@@ -320,6 +302,10 @@ validate_video_files() {
     > "${validated_video_file_list}" # Start with a clean slate.
 
     local reference_width=""
+
+    if [[ "${DISABLE_FPS_VALIDATION}" == "true" ]]; then
+        log WARNING "FPS validation is disabled. All video framerates will be accepted."
+    fi
     local reference_height=""
     local reference_pix_fmt=""
     local reference_frame_rate=""
@@ -364,8 +350,7 @@ validate_video_files() {
             reference_height="${current_height}"
             reference_pix_fmt="${current_pix_fmt}"
             reference_frame_rate="${current_frame_rate}"
-            reference_file="$(basename "${current_file}")"
-            FIRST_VIDEO_FILE="${reference_file}"
+            local reference_file="$(basename "${current_file}")"
             local ref_log_msg="Video compatibility reference set by '${reference_file}', ${reference_width}x${reference_height}, ${reference_frame_rate} FPS, ${reference_pix_fmt}"
 
             if [[ "$validate_audio" == "true" ]]; then
@@ -393,47 +378,49 @@ validate_video_files() {
             fi
         fi
         # Frame rate check: allow if one frame rate is an integer multiple of the other (e.g., 30/60, 60/30, 24/48).
-        if [[ "${current_frame_rate}" != "${reference_frame_rate}" ]]; then
-            local ref_num ref_den cur_num cur_den
-            IFS='/' read -r ref_num ref_den <<< "${reference_frame_rate}"
-            ref_den=${ref_den:-1} # Default denominator to 1 if not specified (e.g. 30 instead of 30/1)
-            IFS='/' read -r cur_num cur_den <<< "${current_frame_rate}"
-            cur_den=${cur_den:-1} # Default denominator to 1
-            
-            # Use shell arithmetic to check for zero values to avoid division by zero in awk.
-            if (( cur_den * ref_num == 0 || ref_den * cur_num == 0 )); then
-                log WARNING "Skipping video '$(basename "${current_file}")' due to zero value in frame rate calculation. Ref: ${reference_frame_rate}, Current: ${current_frame_rate}."
-                is_compatible=false
-            else
-                # Use a single awk command for efficient floating-point math.
-                # This is much faster than forking 'bc' multiple times for every file.
-                # This script is POSIX-compliant to work with any awk version (e.g., mawk, busybox awk).
-                if awk -v ref_num="${ref_num}" -v ref_den="${ref_den}" -v cur_num="${cur_num}" -v cur_den="${cur_den}" 'BEGIN {
-                        # Check for division by zero.
-                        if ( (cur_den * ref_num) == 0 || (ref_den * cur_num) == 0 ) {
-                            exit 1;
-                        }
-                        # Calculate both ratios.
-                        ratio1 = (cur_num * ref_den) / (cur_den * ref_num);
-                        ratio2 = (ref_num * cur_den) / (ref_den * cur_num);
-                        # Check if either ratio is a multiple (>=1 and close to an integer).
-                        is_multiple = 0;
-                        diff1 = ratio1 - sprintf("%.0f", ratio1);
-                        if (ratio1 >= 0.99 && (diff1 * diff1) < 0.0001) {
-                            is_multiple = 1;
-                        }
-                        if (is_multiple == 0) {
-                            diff2 = ratio2 - sprintf("%.0f", ratio2);
-                            if (ratio2 >= 0.99 && (diff2 * diff2) < 0.0001) {
+        if [[ "${DISABLE_FPS_VALIDATION}" != "true" ]]; then # Only perform validation if not disabled
+            if [[ "${current_frame_rate}" != "${reference_frame_rate}" ]]; then
+                local ref_num ref_den cur_num cur_den
+                IFS='/' read -r ref_num ref_den <<< "${reference_frame_rate}"
+                ref_den=${ref_den:-1} # Default denominator to 1 if not specified (e.g. 30 instead of 30/1)
+                IFS='/' read -r cur_num cur_den <<< "${current_frame_rate}"
+                cur_den=${cur_den:-1} # Default denominator to 1
+                
+                # Use shell arithmetic to check for zero values to avoid division by zero in awk.
+                if (( cur_den * ref_num == 0 || ref_den * cur_num == 0 )); then
+                    log WARNING "Skipping video '$(basename "${current_file}")' due to zero value in frame rate calculation. Ref: ${reference_frame_rate}, Current: ${current_frame_rate}."
+                    is_compatible=false
+                else
+                    # Use a single awk command for efficient floating-point math.
+                    # This is much faster than forking 'bc' multiple times for every file.
+                    # This script is POSIX-compliant to work with any awk version (e.g., mawk, busybox awk).
+                    if awk -v ref_num="${ref_num}" -v ref_den="${ref_den}" -v cur_num="${cur_num}" -v cur_den="${cur_den}" 'BEGIN {
+                            # Check for division by zero.
+                            if ( (cur_den * ref_num) == 0 || (ref_den * cur_num) == 0 ) {
+                                exit 1;
+                            }
+                            # Calculate both ratios.
+                            ratio1 = (cur_num * ref_den) / (cur_den * ref_num);
+                            ratio2 = (ref_num * cur_den) / (ref_den * cur_num);
+                            # Check if either ratio is a multiple (>=1 and close to an integer).
+                            is_multiple = 0;
+                            diff1 = ratio1 - sprintf("%.0f", ratio1);
+                            if (ratio1 >= 0.99 && (diff1 * diff1) < 0.0001) {
                                 is_multiple = 1;
                             }
-                        }
-                        if (is_multiple == 1) { exit 0; } else { exit 1; }
-                    }'; then
-                    log INFO "Video '$(basename "${current_file}")' has a frame rate (${current_frame_rate}). Accepting."
-                else
-                    log WARNING "Skipping video '$(basename "${current_file}")' due to incompatible frame rate. Expected a multiple or divisor of ${reference_frame_rate}, but found ${current_frame_rate}."
-                    is_compatible=false
+                            if (is_multiple == 0) {
+                                diff2 = ratio2 - sprintf("%.0f", ratio2);
+                                if (ratio2 >= 0.99 && (diff2 * diff2) < 0.0001) {
+                                    is_multiple = 1;
+                                }
+                            }
+                            if (is_multiple == 1) { exit 0; } else { exit 1; }
+                        }'; then
+                        log INFO "Video '$(basename "${current_file}")' has a frame rate (${current_frame_rate}). Accepting."
+                    else
+                        log WARNING "Skipping video '$(basename "${current_file}")' due to incompatible frame rate. Expected a multiple or divisor of ${reference_frame_rate}, but found ${current_frame_rate}."
+                        is_compatible=false
+                    fi
                 fi
             fi
         fi
@@ -674,24 +661,41 @@ process_ffmpeg_output() {
             if [[ "$playing_file" == "${VIDEO_DIR}"* ]]; then
                 currently_playing_video_basename="$(basename "${playing_file}")"
                 if [[ "$FIRST_VIDEO_FILE" == "$currently_playing_video_basename" ]]; then
-                    # A loop has occurred.
-                    # Check for RESHUFFLE_ON_LOOP first.
-                    # We check playlist_loop_count > 0 to avoid a false positive on the very first video.
-                    if [[ "${ENABLE_SHUFFLE}" == "true" && "${RESHUFFLE_ON_LOOP}" == "true" && "$playlist_loop_count" -gt 0 ]]; then
-                        log WARNING "Playlist has looped. Triggering reshuffle as RESHUFFLE_ON_LOOP is enabled."
-                        # Signal the monitor to perform a hard restart, which will regenerate the shuffled playlist.
-                        # Use atomic move to create signal file.
-                        touch "${reshuffle_signal_file}.tmp" && mv "${reshuffle_signal_file}.tmp" "${reshuffle_signal_file}"
+                    # A loop has occurred. First, check if it was premature (corrupt file).
+                    # This must be checked before the reshuffle logic.
+                    if [[ "$playlist_loop_count" -gt 0 && "$current_video_index" -lt "$video_file_count" ]]; then
+                        log WARNING "Premature playlist loop detected after '${previous_video_basename}'. The next file in the playlist is likely corrupt."
+
+                        local suspect_file_path
+                        # Use awk to find the line after the one matching the previous video and extract the file path.
+                        # The \047 is an octal escape for a single quote, needed for the shell to correctly pass the quote to awk.
+                        suspect_file_path=$(awk -v prev_file="${previous_video_basename}" '
+                            found { print; exit }
+                            $0 ~ "file \047.*/" prev_file "\047" { found=1 }
+                        ' "${filtered_video_file_list}")
+
+                        if [[ -n "$suspect_file_path" ]] && [[ "$suspect_file_path" =~ ^file\ \'(.*)\'$ ]]; then
+                            local suspect_basename
+                            suspect_basename=$(basename "${BASH_REMATCH[1]}")
+                            log ERROR "Identified suspect file: '${suspect_basename}'. Excluding it and restarting."
+                            # Signal the monitor to restart and exclude the problematic file.
+                            echo "${suspect_basename}" > "${premature_loop_signal_file}.tmp" && mv "${premature_loop_signal_file}.tmp" "${premature_loop_signal_file}"
+                        else
+                            log ERROR "Could not identify the problematic file after '${previous_video_basename}'. Triggering a hard restart to reshuffle and hopefully resolve the issue."
+                            touch "${reshuffle_signal_file}.tmp" && mv "${reshuffle_signal_file}.tmp" "${reshuffle_signal_file}"
+                        fi
                         # The monitor will kill this process soon. Exit the function.
                         return
                     fi
 
-                    # Check if the previous loop completed fully.
-                    if [[ "$playlist_loop_count" -gt 0 && "$current_video_index" -lt "$video_file_count" ]]; then
-                        log ERROR "Premature playlist loop detected after '${previous_video_basename}'. The file is likely corrupt."
-                        # Signal the monitor to restart and exclude the problematic file.
-                        # Use a temp file and rename for an atomic operation to avoid race conditions with the monitor.
-                        echo "${previous_video_basename}" > "${premature_loop_signal_file}.tmp" && mv "${premature_loop_signal_file}.tmp" "${premature_loop_signal_file}"
+                    # If the loop was not premature, check if we should reshuffle for the next loop.
+                    # We check playlist_loop_count > 0 to avoid a false positive on the very first video.
+                    if [[ "${ENABLE_SHUFFLE}" == "true" && "${RESHUFFLE_ON_LOOP}" == "true" && "$playlist_loop_count" -gt 0 ]]; then
+                        log WARNING "Playlist has completed a full loop. Triggering reshuffle as RESHUFFLE_ON_LOOP is enabled."
+                        # Signal the monitor to perform a hard restart, which will regenerate the shuffled playlist.
+                        touch "${reshuffle_signal_file}.tmp" && mv "${reshuffle_signal_file}.tmp" "${reshuffle_signal_file}"
+                        # The monitor will kill this process soon. Exit the function.
+                        return
                     fi
 
                     let "playlist_loop_count+=1"
@@ -718,6 +722,18 @@ start_streaming() {
     if [[ ! -s "${filtered_video_file_list}" ]]; then
         log WARNING "No compatible video files found to stream after exclusion. Waiting for files to be added or corrected."
         return
+    fi
+
+    # Set FIRST_VIDEO_FILE from the final, filtered list to ensure loop detection works correctly,
+    # especially when the first file in a shuffled list gets excluded.
+    local first_line
+    first_line=$(head -n 1 "${filtered_video_file_list}")
+    if [[ "$first_line" =~ ^file\ \'(.*)\'$ ]]; then
+        FIRST_VIDEO_FILE=$(basename "${BASH_REMATCH[1]}")
+        log INFO "First video in playlist set to: '${FIRST_VIDEO_FILE}' for loop detection."
+    else
+        log ERROR "Could not determine the first video file from the playlist. Loop detection may be unreliable."
+        FIRST_VIDEO_FILE="" # Clear it to prevent mismatches
     fi
 
     local -a ffmpeg_opts
@@ -798,13 +814,20 @@ start_streaming() {
     log INFO "FFmpeg started with PID: ${ffmpeg_pid}"
 }
 
-# Monitors the running FFmpeg process for stalls and restarts it if needed.
+# Helper function for the monitor to reset its state after a restart.
+reset_monitor_state() {
+    stall_counter=0
+    # The timestamp file might not exist if the stream failed to start, so check for it.
+    [[ -f "${new_video_timestamp_file}" ]] && last_video_start_timestamp=$(stat -c %Y "${new_video_timestamp_file}") || last_video_start_timestamp=0
+}
+
 monitor_for_stall() {
     set +e  # Disable exit on error inside stall monitor loop
     local stall_counter=0
     local last_video_start_timestamp=$(stat -c %Y "${new_video_timestamp_file}")
     
     log INFO "Starting FFmpeg stall monitor. Reading from ${progress_pipe}"
+    reset_monitor_state # Set initial timestamp
     
     # We will loop continuously and read from the progress pipe.
     # `read -r -t` is used to implement a timeout.
@@ -831,10 +854,16 @@ monitor_for_stall() {
         read -r -t "${STALL_MONITOR_INTERVAL}" key_value_pair < "${progress_pipe}"
         read_status=$?
 
-        if [[ ${read_status} -eq 0 ]]; then
+        if [[ $read_status -eq 0 ]]; then
             # Read was successful, continue processing.
             : # No-op, fall through to the processing logic below.
-        elif [[ ${read_status} -gt 128 ]]; then
+        elif [[ $read_status -eq 1 ]]; then
+            # EOF on the pipe. This means ffmpeg has exited.
+            log ERROR "[Stall Monitor] Progress pipe closed (EOF). FFmpeg has likely exited. Restarting..."
+            restart_stream "soft"
+            reset_monitor_state
+            continue # Continue the monitor loop
+        elif [[ $read_status -gt 128 ]]; then
             # A timeout occurred, which is the primary indicator of a stall.
             log WARNING "[Stall Monitor] No progress update received for ${STALL_MONITOR_INTERVAL}s. Checking FFmpeg status..."
             if [[ -n "${ffmpeg_pid}" ]] && kill -0 "${ffmpeg_pid}" &>/dev/null; then
@@ -844,21 +873,19 @@ monitor_for_stall() {
                 if (( stall_counter >= STALL_THRESHOLD )); then
                     log ERROR "FFmpeg appears to be stalled (silent). Restarting stream..."
                     restart_stream "hard" # No specific file to exclude, but still a hard restart.
-                    stall_counter=0
-                    last_video_start_timestamp=$(stat -c %Y "${new_video_timestamp_file}")
+                    reset_monitor_state
                 fi
             else
                 # The process has died unexpectedly.
                 log ERROR "[Stall Monitor] FFmpeg process is not running. Attempting to restart the stream..."
                 restart_stream "soft" # Soft restart as the cause is unknown.
-                stall_counter=0
-                last_video_start_timestamp=$(stat -c %Y "${new_video_timestamp_file}")
+                reset_monitor_state
             fi
             continue # Skip the regular progress processing below.
         else
-            # An exit code of 1 means EOF (pipe closed by the writer). Other non-zero codes are errors.
-            log ERROR "[Stall Monitor] Progress pipe read failed (status: ${read_status}). This likely means FFmpeg exited. Exiting monitor."
-            break # Exit the monitor loop.
+            # An unexpected read error occurred.
+            log ERROR "[Stall Monitor] Progress pipe read failed with unexpected status: ${read_status}. Exiting monitor."
+            break # Exit the monitor loop for unknown errors.
         fi
 
         # Reset stall counter on any progress update
@@ -884,8 +911,7 @@ monitor_for_stall() {
                     if (( stall_counter >= STALL_THRESHOLD )); then
                         log ERROR "FFmpeg appears to be stalled (speed 0x). Restarting stream..."
                         restart_stream "hard" "${currently_playing_video_basename}"
-                        stall_counter=0
-                        last_video_start_timestamp=$(stat -c %Y "${new_video_timestamp_file}")
+                        reset_monitor_state
                     fi
                 fi
                 ;;
@@ -893,8 +919,7 @@ monitor_for_stall() {
                 # FFmpeg finished cleanly (e.g., if stream_loop was not -1). Do a soft restart.
                 log WARNING "[Stall Monitor] FFmpeg progress ended. Restarting stream..."
                 restart_stream "soft"
-                stall_counter=0
-                last_video_start_timestamp=$(stat -c %Y "${new_video_timestamp_file}")
+                reset_monitor_state
                 ;;
             # No other specific case needed for this implementation, as the timeout handles general stalls.
         esac
