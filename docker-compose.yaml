@@ -10,6 +10,9 @@ services:
     # image: e6on/twitch-streamer:latest
     container_name: twitch-streamer
     restart: always
+    # --- GPU Device Mapping (for Hardware Acceleration) ---
+    # The /dev/dri device mapping is for Intel and AMD GPUs using VA-API.
+    # This section is only needed if ENABLE_HW_ACCEL is set to "true".
     devices:
       - /dev/dri/renderD128:/dev/dri/renderD128
       - /dev/dri/card0:/dev/dri/card0
@@ -21,7 +24,16 @@ services:
       # TWITCH_STREAM_KEY is loaded automatically from the .env file.
       # This line tells compose to pass the variable from the host environment into the container.
       - TWITCH_STREAM_KEY
+      # --- Hardware Acceleration ---
+      # Set to "false" to disable hardware acceleration and use CPU (software) encoding.
+      # This is useful for systems without a compatible Intel/AMD GPU.
+      # When disabled, the 'devices' and 'group_add' sections are not needed.
+      - ENABLE_HW_ACCEL=true
       - VIDEO_DIR=/videos
+      # --- Optional CPU Encoding Settings ---
+      # When ENABLE_HW_ACCEL is "false", you can tune the CPU usage vs. quality with the libx264 preset.
+      # Options: ultrafast, superfast, veryfast, faster, fast, medium, slow, slower, veryslow
+      # - CPU_PRESET=veryfast
       # --- Optional Stream Quality Settings ---
       # Uncomment and adjust these to change stream quality. Defaults are for a 960x540 30fps stream.
       - STREAM_RESOLUTION=1280x720
@@ -60,8 +72,9 @@ services:
       # For best results, choose a server close to you from https://help.twitch.tv/s/twitch-ingest-recommendation
       - TWITCH_INGEST_URL=rtmp://hel03.contribute.live-video.net/app/ # Europe: Finland, Helsinki
       - TZ=Europe/Tallinn
-    # Grant the container user access to the host's render and video groups.
-    # Replace the GIDs below with the output from the 'getent group' commands on your host.
+    # --- Group Permissions (for Hardware Acceleration) ---
+    # Grant the container user access to the host's render/video groups for VA-API.
+    # This is only needed if ENABLE_HW_ACCEL is set to "true".
     group_add:
       - "105" # GID for the 'render' group
       - "44"  # GID for the 'video' group

@@ -1,6 +1,6 @@
 # Twitch Streamer Docker Setup
 
-A simple, efficient, and Docker-based solution for streaming a playlist of video files 24/7 to Twitch using FFmpeg with Intel Quick Sync Video (QSV) hardware acceleration via VA-API. This setup is ideal for low-power systems like UGREEN NASync DXP4800 with an Intel N100 Quad-core CPU.
+A simple, efficient, and Docker-based solution for streaming a playlist of video files 24/7 to Twitch using FFmpeg with Intel Quick Sync Video (QSV) hardware acceleration via VA-API (or a compatible AMD GPU). This setup is ideal for low-power systems like UGREEN NASync DXP4800 with an Intel N100 Quad-core CPU.
 
 ## Features
 
@@ -24,16 +24,21 @@ Before you begin, ensure you have the following installed and configured on your
 
 -   Docker & Docker Compose
 -   Download [FFmpeg - ffmpeg-6.1.2-linux-amd64.tar.xz](https://github.com/AkashiSN/ffmpeg-docker/releases) pre-built binary files.
--   A modern Intel CPU with Quick Sync Video support.
--   **Intel VA-API Drivers:**
-    -   For modern GPUs (Broadwell and newer), install `intel-media-driver`.
-    -   On Debian/Ubuntu: `sudo apt-get install intel-media-va-driver-non-free`
-    -   On Arch Linux: `sudo pacman -S intel-media-driver`
+-   A Twitch account and your **Stream Key**
+-   **For Hardware Acceleration (Recommended):** A modern Intel CPU with Quick Sync Video support or a compatible AMD GPU.
+-   **VA-API Drivers (for Intel or AMD):**
+    -   **For Intel GPUs:** Install `intel-media-driver` for modern GPUs (Broadwell+).
+        -   On Debian/Ubuntu: `sudo apt-get install intel-media-va-driver-non-free`
+        -   On Arch Linux: `sudo pacman -S intel-media-driver`
+    -   **For AMD GPUs:** Install the open-source Mesa VA-API drivers.
+        -   On Debian/Ubuntu: `sudo apt-get install mesa-va-drivers`
+        -   On Arch Linux: `sudo pacman -S libva-mesa-driver`
 -   **Verification Tool (Optional but Recommended):**
     -   Install `vainfo` to check if VA-API is configured correctly.
     -   On Debian/Ubuntu: `sudo apt-get install vainfo`
     -   On Arch Linux: `sudo pacman -S libva-utils`
--   A Twitch account and your **Stream Key**
+
+> **Note:** The GPU and driver requirements are optional if you plan to use software (CPU) encoding. See the configuration section for details.
 
 ## Setup
 
@@ -54,7 +59,9 @@ Download `ffmpeg-6.1.2-linux-amd64.tar.xz` from this [release page](https://gith
 
 ### 3. Configure GPU Access for Docker
 
-The container needs access to your host's GPU. This is done by passing device files and matching user group IDs.
+> **Note:** This step is only required for hardware acceleration (`ENABLE_HW_ACCEL=true`). If you are using CPU encoding, you can skip this and remove the `devices` and `group_add` sections from `docker-compose.yaml`.
+
+The container needs access to your host's GPU for hardware acceleration. This is done by passing device files and matching user group IDs.
 
 First, find the Group IDs (GIDs) for the `render` and `video` groups on your host system:
 
@@ -119,6 +126,27 @@ docker-compose down
 ## Configuration
 
 You can customize the stream's quality and destination by editing the environment section in the `docker-compose.yaml` file.
+
+### Hardware Acceleration vs. CPU Encoding
+
+By default, this setup uses VA-API hardware acceleration. You can switch to software (CPU) encoding if you don't have a compatible GPU or for troubleshooting. This is controlled by the `ENABLE_HW_ACCEL` variable.
+
+```yaml
+# docker-compose.yaml
+# --- Hardware Acceleration ---
+# Set to "false" to disable hardware acceleration and use CPU (software) encoding.
+# This is useful for systems without a compatible Intel/AMD GPU.
+# When disabled, the 'devices' and 'group_add' sections are not needed.
+- ENABLE_HW_ACCEL=true
+
+# --- Optional CPU Encoding Settings ---
+# When ENABLE_HW_ACCEL is "false", you can tune the CPU usage vs. quality with the libx264 preset.
+# Options: ultrafast, superfast, veryfast, faster, fast, medium, slow, slower, veryslow
+# 'veryfast' is a good balance for streaming.
+# - CPU_PRESET=veryfast
+```
+
+When `ENABLE_HW_ACCEL` is set to `false`, the GPU-related prerequisites and setup steps are no longer required.
 
 ### Stream Quality
 

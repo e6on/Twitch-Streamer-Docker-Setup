@@ -26,6 +26,7 @@ readonly STREAM_RESOLUTION=${STREAM_RESOLUTION:-"960x540"}
 readonly STREAM_FRAMERATE=${STREAM_FRAMERATE:-"30"}
 readonly VIDEO_BITRATE=${VIDEO_BITRATE:-"1800k"}
 readonly AUDIO_BITRATE=${AUDIO_BITRATE:-"64k"}
+readonly CPU_PRESET=${CPU_PRESET:-"veryfast"} # For libx264 CPU encoding. Options: ultrafast, superfast, veryfast, faster, fast, medium, slow, slower, veryslow
 readonly GOP_SIZE=$((STREAM_FRAMERATE * 2)) # Keyframe every 2 seconds, as recommended by Twitch.
 readonly TWITCH_INGEST_URL=${TWITCH_INGEST_URL:-"rtmp://live.twitch.tv/app/"}
 
@@ -34,6 +35,7 @@ readonly VIDEO_FILE_TYPES=${VIDEO_FILE_TYPES:-"mp4 mkv mpg mov"} # Space-separat
 readonly MUSIC_FILE_TYPES=${MUSIC_FILE_TYPES:-"mp3 flac wav ogg"} # Space-separated list of music file extensions.
 
 # --- Music & Feature Flags ---
+readonly ENABLE_HW_ACCEL=${ENABLE_HW_ACCEL:-"true"} # Set to "false" to use CPU encoding.
 readonly ENABLE_MUSIC=${ENABLE_MUSIC:-"false"}
 readonly ENABLE_SHUFFLE=${ENABLE_SHUFFLE:-"false"}
 readonly RESHUFFLE_ON_LOOP=${RESHUFFLE_ON_LOOP:-"false"}
@@ -53,6 +55,7 @@ excluded_video_file_path="/data/excluded_videos.txt"
 reshuffle_signal_file="/data/reshuffle.signal"
 premature_loop_signal_file="/data/premature_loop.signal"
 new_video_timestamp_file="/data/new_video_started.tmp"
+loop_count_file="/data/loop_count.state"
 ffmpeg_log_file=""
 ffmpeg_pid=""
 ffmpeg_pipe=""
@@ -546,6 +549,21 @@ kill_log_processor() {
     log_processor_pid=""
 }
 
+# Shuffles the existing filtered playlist file in place.
+shuffle_existing_playlist() {
+    local playlist_file="${filtered_video_file_list}"
+    if [[ ! -s "${playlist_file}" ]]; then
+        log WARNING "Cannot shuffle playlist: file '${playlist_file}' is empty or does not exist."
+        return
+    fi
+
+    log INFO "Reshuffling existing playlist: ${playlist_file}"
+    # Use shuf to shuffle the lines of the playlist file and overwrite it.
+    # Using a temporary file is safer in case of interruption.
+    shuf "${playlist_file}" > "${playlist_file}.tmp" && mv "${playlist_file}.tmp" "${playlist_file}"
+    log INFO "Playlist reshuffled successfully."
+}
+
 # Rebuilds all playlists from source files, including validation and filtering.
 rebuild_playlists() {
     log INFO "Rebuilding and validating all playlists..."
@@ -561,7 +579,8 @@ rebuild_playlists() {
 # Handles stream restarts to reduce code duplication.
 # Arguments:
 #   $1: The type of restart.
-#       "hard": Kills ffmpeg, rebuilds playlists, and restarts. Used for stalls or file changes.
+#       "hard": Kills ffmpeg, rebuilds playlists from scratch, and restarts. Used for stalls or file changes.
+#       "reshuffle": Kills ffmpeg, shuffles the existing playlist without re-validating, and restarts.
 #       "soft": Kills and restarts ffmpeg with existing playlists. Used for clean exits or unexpected crashes.
 #   $2 (optional): The basename of a file to exclude if the restart is due to a stall.
 restart_stream() {
@@ -577,16 +596,26 @@ restart_stream() {
     if [[ -n "$file_to_exclude" ]]; then
         log WARNING "Adding '${file_to_exclude}' to exclusion list."
         echo "${file_to_exclude}" >> "${excluded_video_file_path}"
-    fi
-
-    if [[ "$restart_type" == "hard" ]]; then
+        # If we exclude a file, we must do a hard restart to regenerate the filtered list.
+        rebuild_playlists
+    elif [[ "$restart_type" == "hard" ]]; then
         # A hard restart involves re-reading the file system.
         rebuild_playlists
+    elif [[ "$restart_type" == "reshuffle" ]]; then
+        # A reshuffle just shuffles the existing filtered list without re-validating.
+        shuffle_existing_playlist
     fi
-
+    # A "soft" restart does nothing here, just restarts ffmpeg with existing lists.
+    
     # Reset counters and start the new stream.
-    # These are reset for both hard and soft restarts to ensure the count is accurate.
-    playlist_loop_count=0
+    # These are reset for all restart types to ensure the count is accurate for the new loop.
+    # Read the latest loop count from the state file.
+    playlist_loop_count=$(<"${loop_count_file}")
+    if [[ "$restart_type" != "reshuffle" ]]; then
+        # For hard/soft restarts, reset the loop count and the state file.
+        playlist_loop_count=0
+        echo "${playlist_loop_count}" > "${loop_count_file}"
+    fi
     current_video_index=0
     start_streaming
 }
@@ -663,7 +692,9 @@ process_ffmpeg_output() {
                 if [[ "$FIRST_VIDEO_FILE" == "$currently_playing_video_basename" ]]; then
                     # A loop has occurred. First, check if it was premature (corrupt file).
                     # This must be checked before the reshuffle logic.
-                    if [[ "$playlist_loop_count" -gt 0 && "$current_video_index" -lt "$video_file_count" ]]; then
+                    # A premature loop is one where the first video repeats before the index reaches the end.
+                    # The check for current_video_index > 0 prevents a false positive on a fresh (re)start where the index is 0.
+                    if [[ "$playlist_loop_count" -gt 0 && "$current_video_index" -gt 0 && "$current_video_index" -lt "$video_file_count" ]]; then
                         log WARNING "Premature playlist loop detected after '${previous_video_basename}'. The next file in the playlist is likely corrupt."
 
                         local suspect_file_path
@@ -689,16 +720,20 @@ process_ffmpeg_output() {
                     fi
 
                     # If the loop was not premature, check if we should reshuffle for the next loop.
-                    # We check playlist_loop_count > 0 to avoid a false positive on the very first video.
-                    if [[ "${ENABLE_SHUFFLE}" == "true" && "${RESHUFFLE_ON_LOOP}" == "true" && "$playlist_loop_count" -gt 0 ]]; then
-                        log WARNING "Playlist has completed a full loop. Triggering reshuffle as RESHUFFLE_ON_LOOP is enabled."
-                        # Signal the monitor to perform a hard restart, which will regenerate the shuffled playlist.
+                    # A full loop is complete if the video index is at or beyond the total count.
+                    if [[ "${ENABLE_SHUFFLE}" == "true" && "${RESHUFFLE_ON_LOOP}" == "true" && "$current_video_index" -ge "$video_file_count" && "$video_file_count" -gt 0 ]]; then
+                        playlist_loop_count=$((playlist_loop_count + 1))
+                        echo "${playlist_loop_count}" > "${loop_count_file}"
+                        log WARNING "Playlist loop ${playlist_loop_count} starting. Reshuffling playlist as RESHUFFLE_ON_LOOP is enabled."
+                        # Signal the monitor to perform a reshuffle restart.
                         touch "${reshuffle_signal_file}.tmp" && mv "${reshuffle_signal_file}.tmp" "${reshuffle_signal_file}"
-                        # The monitor will kill this process soon. Exit the function.
                         return
+                    elif [[ "$current_video_index" -gt 0 || "$playlist_loop_count" -eq 0 ]]; then
+                        # This is a normal (non-reshuffling) loop start, or the very first video of the stream.
+                        playlist_loop_count=$((playlist_loop_count + 1))
+                        echo "${playlist_loop_count}" > "${loop_count_file}"
                     fi
 
-                    let "playlist_loop_count+=1"
                     current_video_index=1 # Reset for new loop
                     log VIDEO "Playlist loop $playlist_loop_count ($video_duration - $video_file_count files)."
 
@@ -743,10 +778,27 @@ start_streaming() {
         log INFO "Music is enabled and music files were found. Replacing video audio with validated playlist."
     fi
 
-    # Common options
-    # Set loglevel to debug to get maximum information, which should include the 'Opening file...' messages.
-    ffmpeg_opts+=(-nostdin -v debug -hwaccel vaapi -vaapi_device /dev/dri/renderD128 -fflags +genpts)
+    # --- Build FFmpeg command ---
+    # Common options for both HW and SW encoding
+    ffmpeg_opts+=(-nostdin -v debug -fflags +genpts)
     ffmpeg_opts+=(-progress "${progress_pipe}")
+
+    # Hardware vs Software specific options
+    local video_filter_chain=""
+    local video_encoder_opts=()
+
+    if [[ "${ENABLE_HW_ACCEL}" == "true" ]]; then
+        log INFO "Using Hardware Acceleration (VA-API)."
+        ffmpeg_opts+=(-hwaccel vaapi -vaapi_device /dev/dri/renderD128)
+        video_filter_chain="format=nv12,hwupload,scale_vaapi=w=${STREAM_RESOLUTION%x*}:h=${STREAM_RESOLUTION#*x}"
+        video_encoder_opts=(-c:v h264_vaapi)
+    else
+        log INFO "Using Software (CPU) Encoding with preset: ${CPU_PRESET}."
+        # For CPU encoding, the filter chain is simpler and runs on the CPU.
+        video_filter_chain="scale=w=${STREAM_RESOLUTION%x*}:h=${STREAM_RESOLUTION#*x}"
+        # Use libx264 with a preset for good performance.
+        video_encoder_opts=(-c:v libx264 -preset "${CPU_PRESET}")
+    fi
 
     # Input options
     # The -re flag is crucial for the video input to simulate a live stream. It should NOT be applied to the audio input.
@@ -755,19 +807,12 @@ start_streaming() {
         ffmpeg_opts+=(-stream_loop -1 -f concat -safe 0 -i "${validated_music_file_list}") # Music input
     fi
 
-    # Video filter chain definition
-    local video_filter_chain="format=nv12,hwupload,scale_vaapi=w=${STREAM_RESOLUTION%x*}:h=${STREAM_RESOLUTION#*x}"
-
     # Mapping and filtering options
     if [[ "$music_enabled_and_found" == "true" ]]; then
         log INFO "Setting music volume to ${MUSIC_VOLUME}"
         local audio_filter_chain="volume=${MUSIC_VOLUME},asetpts=PTS-STARTPTS"
-        # Use filter_complex to apply video filters and ensure seamless audio looping.
-        # The 'asetpts=PTS-STARTPTS' filter resets audio timestamps each time the playlist loops,
-        # creating a continuous stream and preventing ffmpeg from terminating.
         ffmpeg_opts+=(-filter_complex "[0:v]${video_filter_chain}[v];[1:a]${audio_filter_chain}[a]" -map "[v]" -map "[a]")
     else
-        # No music, so map video and its original audio, and apply the video filter directly.
         ffmpeg_opts+=(-map 0:v:0 -map 0:a:0 -vf "${video_filter_chain}")
     fi
 
@@ -775,12 +820,12 @@ start_streaming() {
     ffmpeg_opts+=(
         -flags +global_header
         -vsync cfr
-        # Audio settings
+        # Audio settings (same for both HW and SW)
         -c:a aac
         -b:a "${AUDIO_BITRATE}"
         -ar 44100
-        # Video settings
-        -c:v h264_vaapi
+        # Video settings (encoder is set conditionally above)
+        "${video_encoder_opts[@]}"
         -r "${STREAM_FRAMERATE}"
         -b:v "${VIDEO_BITRATE}"
         -minrate "${VIDEO_BITRATE}"
@@ -834,9 +879,9 @@ monitor_for_stall() {
     while true; do
         # Check for a reshuffle signal.
         if [[ -f "${reshuffle_signal_file}" ]]; then
-            log INFO "[Stall Monitor] Reshuffle signal detected. Restarting stream to reshuffle playlist."
+            log INFO "[Stall Monitor] Reshuffle signal detected. Reshuffling playlist and restarting stream."
             rm -f "${reshuffle_signal_file}"
-            restart_stream "hard" # A hard restart will re-run generate_playlist which will shuffle
+            restart_stream "reshuffle"
             continue # Restart the monitor's loop
         fi
 
@@ -989,6 +1034,7 @@ main() {
     rm -f "${premature_loop_signal_file}.tmp" # Ensure no stale temp signal file exists on start
     rm -f "${reshuffle_signal_file}" # Ensure no stale signal file exists on start
     rm -f "${reshuffle_signal_file}.tmp" # Ensure no stale temp signal file exists on start
+    echo "0" > "${loop_count_file}" # Initialize loop count state
 
     check_dependencies
     check_env_vars
