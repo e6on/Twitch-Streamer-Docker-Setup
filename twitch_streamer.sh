@@ -77,17 +77,17 @@ log() {
     timestamp=$(date +"%Y-%m-%d %H:%M:%S")
 
     case "$level" in
-        INFO) color="${GREEN}" ;;
-        MUSIC) color="${GREEN}" ;;
-        WARNING) color="${YELLOW}" ;;
-        VIDEO) color="${CYAN}" ;;
-        ERROR) color="${RED}" ;;
+        INF) color="${GREEN}" ;;
+        MUS) color="${GREEN}" ;;
+        WAR) color="${YELLOW}" ;;
+        VID) color="${CYAN}" ;;
+        ERR) color="${RED}" ;;
     esac
     # Log to stderr to not interfere with other command outputs.
     >&2 echo -e "${color}${timestamp} [${level}] ${message}${NC}"
 
     if [[ "${ENABLE_SCRIPT_LOG_FILE}" == "true" ]]; then
-        if [[ "$level" == "WARNING" ]] || [[ "$level" == "ERROR" ]] || [[ "$level" == "VIDEO" ]]; then
+        if [[ "$level" == "WAR" ]] || [[ "$level" == "ERR" ]] || [[ "$level" == "VID" ]]; then
             # Write uncolored message to the log file.
             echo "${timestamp} [${level}] ${message}" >> "${script_log_file}"
         fi
@@ -96,7 +96,7 @@ log() {
 
 # Cleanup function to be called on script exit.
 cleanup() {
-    log INFO "Cleaning up and exiting..."
+    log INF "Cleaning up and exiting..."
     kill_ffmpeg
     kill_monitor
     kill_log_processor
@@ -106,18 +106,16 @@ cleanup() {
     if [[ -n "${progress_pipe:-}" ]] && [[ -p "${progress_pipe}" ]]; then
         rm -f "${progress_pipe}"
     fi
-    if [[ -f "${premature_loop_signal_file:-}" ]]; then rm -f "${premature_loop_signal_file}"; fi
-    if [[ -f "${premature_loop_signal_file:-}.tmp" ]]; then rm -f "${premature_loop_signal_file}.tmp"; fi
-    if [[ -f "${reshuffle_signal_file:-}" ]]; then rm -f "${reshuffle_signal_file}"; fi
-    if [[ -f "${reshuffle_signal_file:-}.tmp" ]]; then rm -f "${reshuffle_signal_file}.tmp"; fi
+    rm -f "${premature_loop_signal_file}" "${premature_loop_signal_file}.tmp"
+    rm -f "${reshuffle_signal_file}" "${reshuffle_signal_file}.tmp"
 }
 
 # Check for required commands.
 check_dependencies() {
-    log INFO "Checking for required dependencies..."
+    log INF "Checking for required dependencies..."
     for cmd in ffmpeg ffprobe inotifywait awk; do
         if ! command -v "$cmd" &> /dev/null; then
-            log ERROR "Required command '$cmd' is not installed. Please install it and try again."
+            log ERR "Required command '$cmd' is not installed. Please install it and try again."
             exit 1
         fi
     done
@@ -126,28 +124,28 @@ check_dependencies() {
 # Check required environment variables.
 check_env_vars() {
     local var
-    log INFO "Checking for required environment variables..."
+    log INF "Checking for required environment variables..."
 
     for var in VIDEO_DIR TWITCH_STREAM_KEY STREAM_RESOLUTION STREAM_FRAMERATE VIDEO_BITRATE AUDIO_BITRATE VIDEO_FILE_TYPES; do
         if [[ -z "${!var:-}" ]]; then
-            log ERROR "Required environment variable ${var} is not set."
+            log ERR "Required environment variable ${var} is not set."
             exit 1
         fi
     done
 
     if [[ ! -d "${VIDEO_DIR}" ]]; then
-        log ERROR "VIDEO_DIR (${VIDEO_DIR}) is not a valid directory."
+        log ERR "VIDEO_DIR (${VIDEO_DIR}) is not a valid directory."
         exit 1
     fi
 
     if [[ "${ENABLE_MUSIC}" == "true" ]]; then
-        log INFO "Music is enabled. Checking music-related variables..."
+        log INF "Music is enabled. Checking music-related variables..."
         if [[ -z "${MUSIC_DIR:-}" ]]; then
-            log ERROR "ENABLE_MUSIC is true, but MUSIC_DIR is not set."
+            log ERR "ENABLE_MUSIC is true, but MUSIC_DIR is not set."
             exit 1
         fi
         if [[ ! -d "${MUSIC_DIR}" ]]; then
-            log ERROR "MUSIC_DIR (${MUSIC_DIR}) is not a valid directory."
+            log ERR "MUSIC_DIR (${MUSIC_DIR}) is not a valid directory."
             exit 1
         fi
     fi
@@ -165,13 +163,13 @@ generate_playlist() {
     local output_file="$3"
     local media_type="$4"
 
-    log INFO "Generating ${media_type} list from ${source_dir} for types: ${file_types}..."
+    log INF "Generating ${media_type} list from ${source_dir} for types: ${file_types}..."
     # Sanitize file_types to handle values passed with quotes from docker-compose, e.g., "mp4 mkv mov"
     local sanitized_file_types="${file_types%\"}" # Remove trailing quote
     sanitized_file_types="${sanitized_file_types#\"}"   # Remove leading quote
 
     if [[ -z "${sanitized_file_types}" ]]; then
-        log WARNING "No file types specified for ${media_type}. Playlist will be empty."
+        log WAR "No file types specified for ${media_type}. Playlist will be empty."
         # Create an empty file and return to prevent find from listing all files.
         > "${output_file}"
         return
@@ -196,7 +194,7 @@ generate_playlist() {
 
     local sort_or_shuffle_cmd
     if [[ "${media_type}" == "Video" && "${ENABLE_SHUFFLE}" == "true" ]]; then
-        log INFO "Shuffle mode is enabled for videos."
+        log INF "Shuffle mode is enabled for videos."
         sort_or_shuffle_cmd=(shuf -z)
     else
         sort_or_shuffle_cmd=(sort -z)
@@ -205,7 +203,7 @@ generate_playlist() {
     # Use find -print0 and read -d '' to robustly handle filenames with special characters.
     #{ find "${find_args[@]}" -print0 | sort -z | while IFS= read -r -d '' file; do echo "file '$file'"; done; } > "${output_file}"
     { find "${find_args[@]}" -print0 | "${sort_or_shuffle_cmd[@]}" | while IFS= read -r -d '' file; do echo "file '$file'"; done; } > "${output_file}"
-    log INFO "${media_type} file list generated at ${output_file}"
+    log INF "${media_type} file list generated at ${output_file}"
 }
 
 # Wrapper function to generate the video playlist.
@@ -235,7 +233,7 @@ validate_music_files() {
         return
     fi
 
-    log INFO "Validating music files for stream compatibility..."
+    log INF "Validating music files for stream compatibility..."
     > "${validated_music_file_list}" # Start with a clean slate.
 
     local reference_sample_rate=""
@@ -254,7 +252,7 @@ validate_music_files() {
         local probe_output
         # Use the CSV output format to get a single line of comma-separated values.
         if ! probe_output=$(ffprobe -v error -select_streams a:0 -show_entries stream=sample_rate,channels -of csv=p=0 "${current_file}"); then
-            log WARNING "Could not probe audio stream for '$(basename "${current_file}")'. Skipping."
+            log WAR "Could not probe audio stream for '$(basename "${current_file}")'. Skipping."
             continue
         fi
 
@@ -266,7 +264,7 @@ validate_music_files() {
             reference_sample_rate="${current_sample_rate}"
             reference_channels="${current_channels}"
             reference_file="$(basename "${current_file}")"
-            log INFO "Music compatibility reference set by '${reference_file}', ${reference_sample_rate} Hz, ${reference_channels} ch"
+            log INF "Music compatibility reference set by '${reference_file}', ${reference_sample_rate} Hz, ${reference_channels} ch"
             echo "$line" >> "${validated_music_file_list}"
             continue
         fi
@@ -274,11 +272,11 @@ validate_music_files() {
         # Validate subsequent files against the reference.
         local is_compatible=true
         if [[ "${current_sample_rate}" != "${reference_sample_rate}" ]]; then
-            log WARNING "Skipping '$(basename "${current_file}")' due to mismatched sample rate. Expected: ${reference_sample_rate}, Found: ${current_sample_rate}."
+            log WAR "Skipping '$(basename "${current_file}")' due to mismatched sample rate. Expected: ${reference_sample_rate}, Found: ${current_sample_rate}."
             is_compatible=false
         fi
         if [[ "${current_channels}" != "${reference_channels}" ]]; then
-            log WARNING "Skipping '$(basename "${current_file}")' due to mismatched audio channels. Expected: ${reference_channels}, Found: ${current_channels}."
+            log WAR "Skipping '$(basename "${current_file}")' due to mismatched audio channels. Expected: ${reference_channels}, Found: ${current_channels}."
             is_compatible=false
         fi
 
@@ -288,7 +286,7 @@ validate_music_files() {
     done < "${music_file_list}"
 
     if [[ ! -s "${validated_music_file_list}" ]]; then
-        log WARNING "No compatible music files found after validation. Music will be disabled for this stream."
+        log WAR "No compatible music files found after validation. Music will be disabled for this stream."
     fi
 }
 
@@ -301,13 +299,13 @@ validate_video_files() {
         return
     fi
 
-    log INFO "Validating video files for stream compatibility..."
+    log INF "Validating video files for stream compatibility..."
     > "${validated_video_file_list}" # Start with a clean slate.
 
     local reference_width=""
 
     if [[ "${DISABLE_FPS_VALIDATION}" == "true" ]]; then
-        log WARNING "FPS validation is disabled. All video framerates will be accepted."
+        log WAR "FPS validation is disabled. All video framerates will be accepted."
     fi
     local reference_height=""
     local reference_pix_fmt=""
@@ -319,7 +317,7 @@ validate_video_files() {
     local validate_audio=true
     if [[ "${ENABLE_MUSIC}" == "true" ]]; then
         validate_audio=false
-        log INFO "Music is enabled; skipping video audio validation."
+        log INF "Music is enabled; skipping video audio validation."
     fi
 
     while IFS= read -r line; do
@@ -331,7 +329,7 @@ validate_video_files() {
         # --- Video Validation ---
         local video_probe_output
         if ! video_probe_output=$(ffprobe -v error -select_streams v:0 -show_entries stream=width,height,pix_fmt,r_frame_rate -of csv=p=0 "${current_file}"); then
-            log WARNING "Could not probe video stream for '$(basename "${current_file}")'. Skipping."
+            log WAR "Could not probe video stream for '$(basename "${current_file}")'. Skipping."
             continue
         fi
         local current_width current_height current_pix_fmt current_frame_rate
@@ -341,7 +339,7 @@ validate_video_files() {
         local audio_probe_output current_sample_rate current_channels
         if [[ "$validate_audio" == "true" ]]; then
             if ! audio_probe_output=$(ffprobe -v error -select_streams a:0 -show_entries stream=sample_rate,channels -of csv=p=0 "${current_file}"); then
-                log WARNING "Could not probe audio stream for video '$(basename "${current_file}")'. It might not have audio. Skipping."
+                log WAR "Could not probe audio stream for video '$(basename "${current_file}")'. It might not have audio. Skipping."
                 continue
             fi
             IFS=',' read -r current_sample_rate current_channels <<< "${audio_probe_output}"
@@ -361,7 +359,7 @@ validate_video_files() {
                 reference_channels="${current_channels}"
                 ref_log_msg+=", AudioSampleRate=${reference_sample_rate}, AudioChannels=${reference_channels}"
             fi
-            log INFO "${ref_log_msg}"
+            log INF "${ref_log_msg}"
             echo "$line" >> "${validated_video_file_list}"
             continue
         fi
@@ -370,13 +368,13 @@ validate_video_files() {
         local is_compatible=true
         # Video checks
         if [[ "${current_width}" != "${reference_width}" ]] || [[ "${current_height}" != "${reference_height}" ]]; then
-            log WARNING "Skipping video '$(basename "${current_file}")' due to mismatched resolution. Expected: ${reference_width}x${reference_height}, Found: ${current_width}x${current_height}."
+            log WAR "Skipping video '$(basename "${current_file}")' due to mismatched resolution. Expected: ${reference_width}x${reference_height}, Found: ${current_width}x${current_height}."
             is_compatible=false
         fi
         if [[ "${current_pix_fmt}" != "${reference_pix_fmt}" ]]; then
             # Check for compatible pixel formats
             if ! { [[ "${reference_pix_fmt}" == "yuv420p" && "${current_pix_fmt}" == "yuvj420p" ]] || [[ "${reference_pix_fmt}" == "yuvj420p" && "${current_pix_fmt}" == "yuv420p" ]]; }; then
-                log WARNING "Skipping video '$(basename "${current_file}")' due to mismatched pixel format. Expected: ${reference_pix_fmt}, Found: ${current_pix_fmt}."
+                log WAR "Skipping video '$(basename "${current_file}")' due to mismatched pixel format. Expected: ${reference_pix_fmt}, Found: ${current_pix_fmt}."
                 is_compatible=false
             fi
         fi
@@ -391,37 +389,32 @@ validate_video_files() {
                 
                 # Use shell arithmetic to check for zero values to avoid division by zero in awk.
                 if (( cur_den * ref_num == 0 || ref_den * cur_num == 0 )); then
-                    log WARNING "Skipping video '$(basename "${current_file}")' due to zero value in frame rate calculation. Ref: ${reference_frame_rate}, Current: ${current_frame_rate}."
+                    log WAR "Skipping video '$(basename "${current_file}")' due to zero value in frame rate calculation. Ref: ${reference_frame_rate}, Current: ${current_frame_rate}."
                     is_compatible=false
                 else
                     # Use a single awk command for efficient floating-point math.
-                    # This is much faster than forking 'bc' multiple times for every file.
-                    # This script is POSIX-compliant to work with any awk version (e.g., mawk, busybox awk).
+                    # This is much faster than forking 'bc' for every file and is POSIX-compliant.
                     if awk -v ref_num="${ref_num}" -v ref_den="${ref_den}" -v cur_num="${cur_num}" -v cur_den="${cur_den}" 'BEGIN {
-                            # Check for division by zero.
-                            if ( (cur_den * ref_num) == 0 || (ref_den * cur_num) == 0 ) {
-                                exit 1;
-                            }
                             # Calculate both ratios.
                             ratio1 = (cur_num * ref_den) / (cur_den * ref_num);
                             ratio2 = (ref_num * cur_den) / (ref_den * cur_num);
-                            # Check if either ratio is a multiple (>=1 and close to an integer).
-                            is_multiple = 0;
+
+                            # Check if ratio1 is close to an integer >= 1.
                             diff1 = ratio1 - sprintf("%.0f", ratio1);
                             if (ratio1 >= 0.99 && (diff1 * diff1) < 0.0001) {
-                                is_multiple = 1;
+                                exit 0;
                             }
-                            if (is_multiple == 0) {
-                                diff2 = ratio2 - sprintf("%.0f", ratio2);
-                                if (ratio2 >= 0.99 && (diff2 * diff2) < 0.0001) {
-                                    is_multiple = 1;
-                                }
+
+                            # Check if ratio2 is close to an integer >= 1.
+                            diff2 = ratio2 - sprintf("%.0f", ratio2);
+                            if (ratio2 >= 0.99 && (diff2 * diff2) < 0.0001) {
+                                exit 0;
                             }
-                            if (is_multiple == 1) { exit 0; } else { exit 1; }
+                            exit 1;
                         }'; then
-                        log INFO "Video '$(basename "${current_file}")' has a frame rate (${current_frame_rate}). Accepting."
+                        log INF "Video '$(basename "${current_file}")' has a frame rate (${current_frame_rate}). Accepting."
                     else
-                        log WARNING "Skipping video '$(basename "${current_file}")' due to incompatible frame rate. Expected a multiple or divisor of ${reference_frame_rate}, but found ${current_frame_rate}."
+                        log WAR "Skipping video '$(basename "${current_file}")' due to incompatible frame rate. Expected a multiple or divisor of ${reference_frame_rate}, but found ${current_frame_rate}."
                         is_compatible=false
                     fi
                 fi
@@ -431,11 +424,11 @@ validate_video_files() {
         # Audio checks
         if [[ "$validate_audio" == "true" ]]; then
             if [[ "${current_sample_rate}" != "${reference_sample_rate}" ]]; then
-                log WARNING "Skipping video '$(basename "${current_file}")' due to mismatched audio sample rate. Expected: ${reference_sample_rate}, Found: ${current_sample_rate}."
+                log WAR "Skipping video '$(basename "${current_file}")' due to mismatched audio sample rate. Expected: ${reference_sample_rate}, Found: ${current_sample_rate}."
                 is_compatible=false
             fi
             if [[ "${current_channels}" != "${reference_channels}" ]]; then
-                log WARNING "Skipping video '$(basename "${current_file}")' due to mismatched audio channels. Expected: ${reference_channels}, Found: ${current_channels}."
+                log WAR "Skipping video '$(basename "${current_file}")' due to mismatched audio channels. Expected: ${reference_channels}, Found: ${current_channels}."
                 is_compatible=false
             fi
         fi
@@ -446,7 +439,7 @@ validate_video_files() {
     done < "${video_file_list}"
 
     if [[ ! -s "${validated_video_file_list}" ]]; then
-        log WARNING "No videos with compatible properties found after validation. The stream will not start."
+        log WAR "No videos with compatible properties found after validation. The stream will not start."
     fi
 }
 
@@ -455,7 +448,7 @@ filter_excluded_files() {
     local input_list="${validated_video_file_list}"
     local output_list="${filtered_video_file_list}"
 
-    log INFO "Filtering excluded video files from ${input_list} to ${output_list}..."
+    log INF "Filtering excluded video files from ${input_list} to ${output_list}..."
     > "${output_list}" # Start with a clean slate.
 
     # Initialize EXCLUDED_VIDEO_FILES as an empty array
@@ -466,7 +459,7 @@ filter_excluded_files() {
     fi
 
     if [[ ${#EXCLUDED_VIDEO_FILES[@]} -eq 0 ]]; then # Check if array is empty
-        log INFO "No video files to exclude."
+        log INF "No video files to exclude."
         cp "${input_list}" "${output_list}" || true # Copy if no exclusions
         return
     fi
@@ -483,7 +476,7 @@ filter_excluded_files() {
         for excluded_file in "${EXCLUDED_VIDEO_FILES[@]}"; do
             # Compare basename for exclusion
             if [[ "${current_file_basename}" == "${excluded_file}" ]]; then
-                log WARNING "Excluding video: '${current_file_basename}' (previously caused stall)."
+                log WAR "Excluding video: '${current_file_basename}' (previously caused stall)."
                 is_excluded=true
                 break
             fi
@@ -495,9 +488,9 @@ filter_excluded_files() {
     done < "${input_list}"
 
     if [[ ! -s "${output_list}" ]]; then
-        log ERROR "No video files remaining after exclusion. Stream might not start."
+        log ERR "No video files remaining after exclusion. Stream might not start."
     else
-        log INFO "Filtered video playlist created at ${output_list}."
+        log INF "Filtered video playlist created at ${output_list}."
     fi
 }
 
@@ -506,11 +499,11 @@ kill_ffmpeg() {
     ffmpeg_pids=$(pidof ffmpeg || true)
     if [[ -n "$ffmpeg_pids" ]]; then
         for pid in $ffmpeg_pids; do
-            log WARNING "Killing FFmpeg process with PID: $pid"
+            log WAR "Killing FFmpeg process with PID: $pid"
             kill "$pid" || true
             sleep 2
             if kill -0 "$pid" &>/dev/null; then
-                log WARNING "FFmpeg PID $pid did not terminate. Sending SIGKILL..."
+                log WAR "FFmpeg PID $pid did not terminate. Sending SIGKILL..."
                 kill -9 "$pid" || true
             fi
             wait "$pid" 2>/dev/null || true
@@ -522,11 +515,11 @@ kill_ffmpeg() {
 # Kill monitor_for_stall process
 kill_monitor() {
     if [[ -n "${monitor_pid}" ]] && kill -0 "${monitor_pid}" &>/dev/null; then
-        log WARNING "Killing Stall Monitor process with PID: ${monitor_pid}"
+        log WAR "Killing Stall Monitor process with PID: ${monitor_pid}"
         kill "${monitor_pid}" || true
         sleep 1 # Give it a moment to clean up
         if kill -0 "${monitor_pid}" &>/dev/null; then
-            log WARNING "Stall Monitor PID ${monitor_pid} did not terminate. Sending SIGKILL..."
+            log WAR "Stall Monitor PID ${monitor_pid} did not terminate. Sending SIGKILL..."
             kill -9 "${monitor_pid}" || true
         fi
         wait "${monitor_pid}" 2>/dev/null || true
@@ -537,11 +530,11 @@ kill_monitor() {
 # Kill log processor process
 kill_log_processor() {
     if [[ -n "${log_processor_pid}" ]] && kill -0 "${log_processor_pid}" &>/dev/null; then
-        log WARNING "Killing Log Processor process with PID: ${log_processor_pid}"
+        log WAR "Killing Log Processor process with PID: ${log_processor_pid}"
         kill "${log_processor_pid}" || true
         sleep 1 # Give it a moment to clean up
         if kill -0 "${log_processor_pid}" &>/dev/null; then
-            log WARNING "Log Processor PID ${log_processor_pid} did not terminate. Sending SIGKILL..."
+            log WAR "Log Processor PID ${log_processor_pid} did not terminate. Sending SIGKILL..."
             kill -9 "${log_processor_pid}" || true
         fi
         wait "${log_processor_pid}" 2>/dev/null || true
@@ -553,20 +546,20 @@ kill_log_processor() {
 shuffle_existing_playlist() {
     local playlist_file="${filtered_video_file_list}"
     if [[ ! -s "${playlist_file}" ]]; then
-        log WARNING "Cannot shuffle playlist: file '${playlist_file}' is empty or does not exist."
+        log WAR "Cannot shuffle playlist: file '${playlist_file}' is empty or does not exist."
         return
     fi
 
-    log INFO "Reshuffling existing playlist: ${playlist_file}"
+    log INF "Reshuffling existing playlist: ${playlist_file}"
     # Use shuf to shuffle the lines of the playlist file and overwrite it.
     # Using a temporary file is safer in case of interruption.
     shuf "${playlist_file}" > "${playlist_file}.tmp" && mv "${playlist_file}.tmp" "${playlist_file}"
-    log INFO "Playlist reshuffled successfully."
+    log INF "Playlist reshuffled successfully."
 }
 
 # Rebuilds all playlists from source files, including validation and filtering.
 rebuild_playlists() {
-    log INFO "Rebuilding and validating all playlists..."
+    log INF "Rebuilding and validating all playlists..."
     generate_videolist
     validate_video_files
     filter_excluded_files
@@ -587,14 +580,14 @@ restart_stream() {
     local restart_type="$1"
     local file_to_exclude="${2:-}"
 
-    log WARNING "Restarting stream (type: ${restart_type})..."
+    log WAR "Restarting stream (type: ${restart_type})..."
 
     # Always kill the old processes
     kill_ffmpeg
     kill_log_processor
 
     if [[ -n "$file_to_exclude" ]]; then
-        log WARNING "Adding '${file_to_exclude}' to exclusion list."
+        log WAR "Adding '${file_to_exclude}' to exclusion list."
         echo "${file_to_exclude}" >> "${excluded_video_file_path}"
         # If we exclude a file, we must do a hard restart to regenerate the filtered list.
         rebuild_playlists
@@ -633,7 +626,7 @@ log_total_playlist_duration() {
  
     if [[ ! -s "${playlist_file}" ]]; then return; fi
 
-    log INFO "Calculating total ${media_type} playlist duration..."
+    log INF "Calculating total ${media_type} playlist duration..."
     file_count=$(grep -c ^file "${playlist_file}")
 
     # Use a subshell and pipe to awk for efficient summation, avoiding multiple 'bc' calls.
@@ -643,11 +636,11 @@ log_total_playlist_duration() {
             local current_file="${BASH_REMATCH[1]}"
             local duration
             if ! duration=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${current_file}"); then
-                log WARNING "Could not get duration for '$(basename "${current_file}")'. Skipping from total calculation."
+                log WAR "Could not get duration for '$(basename "${current_file}")'. Skipping from total calculation."
                 continue
             fi
             if [[ -z "$duration" ]]; then
-                log WARNING "Could not get duration for '$(basename "${current_file}")' (duration was empty). Skipping from total calculation."
+                log WAR "Could not get duration for '$(basename "${current_file}")' (duration was empty). Skipping from total calculation."
                 continue
             fi
             echo "${duration}"
@@ -668,7 +661,7 @@ log_total_playlist_duration() {
         local formatted_duration=""
         if (( days > 0 )); then formatted_duration+="${days}d "; fi
         formatted_duration+=$(printf "%02dh:%02dm:%02ds" "${hours}" "${minutes}" "${seconds}")
-        log INFO "Total ${media_type} playlist duration: ${YELLOW}${formatted_duration}${NC} (${file_count} files)"
+        log INF "Total ${media_type} playlist duration: ${YELLOW}${formatted_duration}${NC} (${file_count} files)"
         if [[ "$media_type" == "Video" ]]; then
             video_duration="${formatted_duration}"
             video_file_count=$file_count
@@ -695,7 +688,7 @@ process_ffmpeg_output() {
                     # A premature loop is one where the first video repeats before the index reaches the end.
                     # The check for current_video_index > 0 prevents a false positive on a fresh (re)start where the index is 0.
                     if [[ "$playlist_loop_count" -gt 0 && "$current_video_index" -gt 0 && "$current_video_index" -lt "$video_file_count" ]]; then
-                        log WARNING "Premature playlist loop detected after '${previous_video_basename}'. The next file in the playlist is likely corrupt."
+                        log WAR "Premature playlist loop detected after '${previous_video_basename}'. The next file in the playlist is likely corrupt."
 
                         local suspect_file_path
                         # Use awk to find the line after the one matching the previous video and extract the file path.
@@ -708,11 +701,11 @@ process_ffmpeg_output() {
                         if [[ -n "$suspect_file_path" ]] && [[ "$suspect_file_path" =~ ^file\ \'(.*)\'$ ]]; then
                             local suspect_basename
                             suspect_basename=$(basename "${BASH_REMATCH[1]}")
-                            log ERROR "Identified suspect file: '${suspect_basename}'. Excluding it and restarting."
+                            log ERR "Identified suspect file: '${suspect_basename}'. Excluding it and restarting."
                             # Signal the monitor to restart and exclude the problematic file.
                             echo "${suspect_basename}" > "${premature_loop_signal_file}.tmp" && mv "${premature_loop_signal_file}.tmp" "${premature_loop_signal_file}"
                         else
-                            log ERROR "Could not identify the problematic file after '${previous_video_basename}'. Triggering a hard restart to reshuffle and hopefully resolve the issue."
+                            log ERR "Could not identify the problematic file after '${previous_video_basename}'. Triggering a hard restart to reshuffle and hopefully resolve the issue."
                             touch "${reshuffle_signal_file}.tmp" && mv "${reshuffle_signal_file}.tmp" "${reshuffle_signal_file}"
                         fi
                         # The monitor will kill this process soon. Exit the function.
@@ -724,7 +717,7 @@ process_ffmpeg_output() {
                     if [[ "${ENABLE_SHUFFLE}" == "true" && "${RESHUFFLE_ON_LOOP}" == "true" && "$current_video_index" -ge "$video_file_count" && "$video_file_count" -gt 0 ]]; then
                         playlist_loop_count=$((playlist_loop_count + 1))
                         echo "${playlist_loop_count}" > "${loop_count_file}"
-                        log WARNING "Playlist loop ${playlist_loop_count} starting. Reshuffling playlist as RESHUFFLE_ON_LOOP is enabled."
+                        log WAR "Playlist loop ${playlist_loop_count} starting. Reshuffling playlist as RESHUFFLE_ON_LOOP is enabled."
                         # Signal the monitor to perform a reshuffle restart.
                         touch "${reshuffle_signal_file}.tmp" && mv "${reshuffle_signal_file}.tmp" "${reshuffle_signal_file}"
                         return
@@ -735,18 +728,18 @@ process_ffmpeg_output() {
                     fi
 
                     current_video_index=1 # Reset for new loop
-                    log VIDEO "Playlist loop $playlist_loop_count ($video_duration - $video_file_count files)."
+                    log VID "Playlist loop $playlist_loop_count ($video_duration - $video_file_count files)."
 
                 else
                     let "current_video_index+=1"
                 fi
-				log VIDEO "Now Playing $playlist_loop_count [$current_video_index/$video_file_count]: $(basename "${playing_file}")"
+				log VID "Now Playing $playlist_loop_count [$current_video_index/$video_file_count]: $(basename "${playing_file}")"
                 # Signal that a new video has started playing
                 touch "${new_video_timestamp_file}"
                 # Store the current video as the "previous" one for the next iteration.
                 previous_video_basename="${currently_playing_video_basename}"
             elif [[ "${ENABLE_MUSIC}" == "true" && "$playing_file" == "${MUSIC_DIR}"* ]]; then
-                log MUSIC "Now Playing: $(basename "${playing_file}")"
+                log MUS "Now Playing: $(basename "${playing_file}")"
             fi
         fi
     done
@@ -755,7 +748,7 @@ process_ffmpeg_output() {
 # Start FFmpeg streaming
 start_streaming() {
     if [[ ! -s "${filtered_video_file_list}" ]]; then
-        log WARNING "No compatible video files found to stream after exclusion. Waiting for files to be added or corrected."
+        log WAR "No compatible video files found to stream after exclusion. Waiting for files to be added or corrected."
         return
     fi
 
@@ -765,9 +758,9 @@ start_streaming() {
     first_line=$(head -n 1 "${filtered_video_file_list}")
     if [[ "$first_line" =~ ^file\ \'(.*)\'$ ]]; then
         FIRST_VIDEO_FILE=$(basename "${BASH_REMATCH[1]}")
-        log INFO "First video in playlist set to: '${FIRST_VIDEO_FILE}' for loop detection."
+        log INF "First video in playlist set to: '${FIRST_VIDEO_FILE}' for loop detection."
     else
-        log ERROR "Could not determine the first video file from the playlist. Loop detection may be unreliable."
+        log ERR "Could not determine the first video file from the playlist. Loop detection may be unreliable."
         FIRST_VIDEO_FILE="" # Clear it to prevent mismatches
     fi
 
@@ -775,7 +768,7 @@ start_streaming() {
     local music_enabled_and_found=false
     if [[ "${ENABLE_MUSIC}" == "true" ]] && [[ -s "${validated_music_file_list}" ]]; then
         music_enabled_and_found=true
-        log INFO "Music is enabled and music files were found. Replacing video audio with validated playlist."
+        log INF "Music is enabled and music files were found. Replacing video audio with validated playlist."
     fi
 
     # --- Build FFmpeg command ---
@@ -788,12 +781,12 @@ start_streaming() {
     local video_encoder_opts=()
 
     if [[ "${ENABLE_HW_ACCEL}" == "true" ]]; then
-        log INFO "Using Hardware Acceleration (VA-API)."
+        log INF "Using Hardware Acceleration (VA-API)."
         ffmpeg_opts+=(-hwaccel vaapi -vaapi_device /dev/dri/renderD128)
         video_filter_chain="format=nv12,hwupload,scale_vaapi=w=${STREAM_RESOLUTION%x*}:h=${STREAM_RESOLUTION#*x}"
         video_encoder_opts=(-c:v h264_vaapi)
     else
-        log INFO "Using Software (CPU) Encoding with preset: ${CPU_PRESET}."
+        log INF "Using Software (CPU) Encoding with preset: ${CPU_PRESET}."
         # For CPU encoding, the filter chain is simpler and runs on the CPU.
         video_filter_chain="scale=w=${STREAM_RESOLUTION%x*}:h=${STREAM_RESOLUTION#*x}"
         # Use libx264 with a preset for good performance.
@@ -809,7 +802,7 @@ start_streaming() {
 
     # Mapping and filtering options
     if [[ "$music_enabled_and_found" == "true" ]]; then
-        log INFO "Setting music volume to ${MUSIC_VOLUME}"
+        log INF "Setting music volume to ${MUSIC_VOLUME}"
         local audio_filter_chain="volume=${MUSIC_VOLUME},asetpts=PTS-STARTPTS"
         ffmpeg_opts+=(-filter_complex "[0:v]${video_filter_chain}[v];[1:a]${audio_filter_chain}[a]" -map "[v]" -map "[a]")
     else
@@ -838,7 +831,7 @@ start_streaming() {
         "${TWITCH_INGEST_URL}${TWITCH_STREAM_KEY}"
     )
 
-    log INFO "Starting FFmpeg stream..."
+    log INF "Starting FFmpeg stream..."
 
     # Kill any existing log processor before starting a new one
     kill_log_processor
@@ -856,7 +849,7 @@ start_streaming() {
     # Start ffmpeg, redirect its output to the named pipe, and get its actual PID.
     ffmpeg "${ffmpeg_opts[@]}" >"${ffmpeg_pipe}" 2>&1 &
     ffmpeg_pid=$!
-    log INFO "FFmpeg started with PID: ${ffmpeg_pid}"
+    log INF "FFmpeg started with PID: ${ffmpeg_pid}"
 }
 
 # Helper function for the monitor to reset its state after a restart.
@@ -871,7 +864,7 @@ monitor_for_stall() {
     local stall_counter=0
     local last_video_start_timestamp=$(stat -c %Y "${new_video_timestamp_file}")
     
-    log INFO "Starting FFmpeg stall monitor. Reading from ${progress_pipe}"
+    log INF "Starting FFmpeg stall monitor. Reading from ${progress_pipe}"
     reset_monitor_state # Set initial timestamp
     
     # We will loop continuously and read from the progress pipe.
@@ -879,7 +872,7 @@ monitor_for_stall() {
     while true; do
         # Check for a reshuffle signal.
         if [[ -f "${reshuffle_signal_file}" ]]; then
-            log INFO "[Stall Monitor] Reshuffle signal detected. Reshuffling playlist and restarting stream."
+            log INF "[Stall Monitor] Reshuffle signal detected. Reshuffling playlist and restarting stream."
             rm -f "${reshuffle_signal_file}"
             restart_stream "reshuffle"
             continue # Restart the monitor's loop
@@ -889,7 +882,7 @@ monitor_for_stall() {
         if [[ -f "${premature_loop_signal_file}" ]]; then
             local bad_file
             bad_file=$(<"${premature_loop_signal_file}")
-            log ERROR "[Stall Monitor] Premature loop signal detected. Excluding '${bad_file}' and restarting."
+            log ERR "[Stall Monitor] Premature loop signal detected. Excluding '${bad_file}' and restarting."
             rm -f "${premature_loop_signal_file}"
             restart_stream "hard" "${bad_file}"
             continue # Restart the monitor's loop
@@ -904,32 +897,32 @@ monitor_for_stall() {
             : # No-op, fall through to the processing logic below.
         elif [[ $read_status -eq 1 ]]; then
             # EOF on the pipe. This means ffmpeg has exited.
-            log ERROR "[Stall Monitor] Progress pipe closed (EOF). FFmpeg has likely exited. Restarting..."
+            log ERR "[Stall Monitor] Progress pipe closed (EOF). FFmpeg has likely exited. Restarting..."
             restart_stream "soft"
             reset_monitor_state
             continue # Continue the monitor loop
         elif [[ $read_status -gt 128 ]]; then
             # A timeout occurred, which is the primary indicator of a stall.
-            log WARNING "[Stall Monitor] No progress update received for ${STALL_MONITOR_INTERVAL}s. Checking FFmpeg status..."
+            log WAR "[Stall Monitor] No progress update received for ${STALL_MONITOR_INTERVAL}s. Checking FFmpeg status..."
             if [[ -n "${ffmpeg_pid}" ]] && kill -0 "${ffmpeg_pid}" &>/dev/null; then
                 # The process is still alive but not making progress. This is a stall.
                 let "stall_counter+=1"
-                log WARNING "[Stall Monitor] FFmpeg is still running but silent. Counter: ${stall_counter}/${STALL_THRESHOLD}."
+                log WAR "[Stall Monitor] FFmpeg is still running but silent. Counter: ${stall_counter}/${STALL_THRESHOLD}."
                 if (( stall_counter >= STALL_THRESHOLD )); then
-                    log ERROR "FFmpeg appears to be stalled (silent). Restarting stream..."
+                    log ERR "FFmpeg appears to be stalled (silent). Restarting stream..."
                     restart_stream "hard" # No specific file to exclude, but still a hard restart.
                     reset_monitor_state
                 fi
             else
                 # The process has died unexpectedly.
-                log ERROR "[Stall Monitor] FFmpeg process is not running. Attempting to restart the stream..."
+                log ERR "[Stall Monitor] FFmpeg process is not running. Attempting to restart the stream..."
                 restart_stream "soft" # Soft restart as the cause is unknown.
                 reset_monitor_state
             fi
             continue # Skip the regular progress processing below.
         else
             # An unexpected read error occurred.
-            log ERROR "[Stall Monitor] Progress pipe read failed with unexpected status: ${read_status}. Exiting monitor."
+            log ERR "[Stall Monitor] Progress pipe read failed with unexpected status: ${read_status}. Exiting monitor."
             break # Exit the monitor loop for unknown errors.
         fi
 
@@ -939,7 +932,7 @@ monitor_for_stall() {
         # Check for new video file start via timestamp file
         local current_video_start_timestamp=$(stat -c %Y "${new_video_timestamp_file}")
         if [[ "$current_video_start_timestamp" -gt "$last_video_start_timestamp" ]]; then
-            #log INFO "[Stall Monitor] New video file detected. Resetting monitor state."
+            #log INF "[Stall Monitor] New video file detected. Resetting monitor state."
             last_video_start_timestamp="$current_video_start_timestamp"
             continue # Skip the rest of the current loop as state has been reset
         fi
@@ -948,13 +941,13 @@ monitor_for_stall() {
         case "${key_value_pair}" in
             speed=*)
                 local current_speed="${key_value_pair#speed=}"
-                #log INFO "[Stall Monitor] Current speed: ${current_speed}"
+                #log INF "[Stall Monitor] Current speed: ${current_speed}"
                 # A speed of '0x' indicates a stall.
                 if [[ "${current_speed}" == "0.00x" || "${current_speed}" == "0x" ]]; then
                     let "stall_counter+=1"
-                    log WARNING "[Stall Monitor] FFmpeg speed is 0x. Counter: ${stall_counter}/${STALL_THRESHOLD}."
+                    log WAR "[Stall Monitor] FFmpeg speed is 0x. Counter: ${stall_counter}/${STALL_THRESHOLD}."
                     if (( stall_counter >= STALL_THRESHOLD )); then
-                        log ERROR "FFmpeg appears to be stalled (speed 0x). Restarting stream..."
+                        log ERR "FFmpeg appears to be stalled (speed 0x). Restarting stream..."
                         restart_stream "hard" "${currently_playing_video_basename}"
                         reset_monitor_state
                     fi
@@ -962,7 +955,7 @@ monitor_for_stall() {
                 ;;
             progress=end)
                 # FFmpeg finished cleanly (e.g., if stream_loop was not -1). Do a soft restart.
-                log WARNING "[Stall Monitor] FFmpeg progress ended. Restarting stream..."
+                log WAR "[Stall Monitor] FFmpeg progress ended. Restarting stream..."
                 restart_stream "soft"
                 reset_monitor_state
                 ;;
@@ -979,7 +972,7 @@ watch_for_changes() {
         watch_dirs+=("${MUSIC_DIR}")
     fi
 
-    log INFO "Watching for changes in: ${watch_dirs[*]}..."
+    log INF "Watching for changes in: ${watch_dirs[*]}..."
     # Watch for events that indicate a file has been added, removed, or changed.
     # - close_write: A file opened for writing was closed (for direct copies).
     # - moved_to: A file was moved/renamed into the directory (for atomic "safe copy" operations).
@@ -989,7 +982,7 @@ watch_for_changes() {
     while true; do
         # Wait for the first event. If the read fails, the pipe has closed.
         if ! read -r path event file; then
-            log ERROR "inotifywait process finished unexpectedly."
+            log ERR "inotifywait process finished unexpectedly."
             break
         fi
 
@@ -997,17 +990,17 @@ watch_for_changes() {
         local last_path="${path}"
         local last_event="${event}"
         local last_file="${file}"
-        log WARNING "Change detected (${last_event} on ${last_path}${last_file}). Debouncing for ${RESTART_DEBOUNCE_SECONDS}s..."
+        log WAR "Change detected (${last_event} on ${last_path}${last_file}). Debouncing for ${RESTART_DEBOUNCE_SECONDS}s..."
 
         # Consume subsequent events for the debounce period.
         while read -r -t "${RESTART_DEBOUNCE_SECONDS}" path event file; do
             last_path="${path}"
             last_event="${event}"
             last_file="${file}"
-            log WARNING "Further change detected (${last_event} on ${last_path}${last_file}). Resetting debounce timer."
+            log WAR "Further change detected (${last_event} on ${last_path}${last_file}). Resetting debounce timer."
         done
 
-        log WARNING "Debounce timer finished. Final change was: ${last_event} on ${last_path}${last_file}. Restarting stream..."
+        log WAR "Debounce timer finished. Final change was: ${last_event} on ${last_path}${last_file}. Restarting stream..."
         kill_monitor # Explicitly kill the old monitor process
         # A "hard" restart handles killing ffmpeg/log_processor, rebuilding playlists, and starting the stream.
         restart_stream "hard"
@@ -1030,10 +1023,9 @@ main() {
     mkfifo "${progress_pipe}"
 
     touch "${new_video_timestamp_file}" # Ensure the timestamp file exists initially
-    rm -f "${premature_loop_signal_file}" # Ensure no stale signal file exists on start
-    rm -f "${premature_loop_signal_file}.tmp" # Ensure no stale temp signal file exists on start
-    rm -f "${reshuffle_signal_file}" # Ensure no stale signal file exists on start
-    rm -f "${reshuffle_signal_file}.tmp" # Ensure no stale temp signal file exists on start
+    # Ensure no stale signal files exist on start
+    rm -f "${premature_loop_signal_file}" "${premature_loop_signal_file}.tmp"
+    rm -f "${reshuffle_signal_file}" "${reshuffle_signal_file}.tmp"
     echo "0" > "${loop_count_file}" # Initialize loop count state
 
     check_dependencies
@@ -1044,25 +1036,25 @@ main() {
     validated_video_file_list="/data/validated_videolist.txt"
     filtered_video_file_list="/data/filtered_videolist.txt"
     new_video_timestamp_file="/data/new_video_started.tmp"
-    log INFO "Using videolist ./data/videolist.txt"
-    log INFO "Using validated videolist ./data/validated_videolist.txt"
-    log INFO "Using filtered videolist ./data/filtered_videolist.txt"
+    log INF "Using videolist ./data/videolist.txt"
+    log INF "Using validated videolist ./data/validated_videolist.txt"
+    log INF "Using filtered videolist ./data/filtered_videolist.txt"
 
     if [[ "${ENABLE_MUSIC}" == "true" ]]; then
         music_file_list="/data/musiclist.txt"
         validated_music_file_list="/data/validated_musiclist.txt"
-        log INFO "Using musiclist ./data/musiclist.txt"
+        log INF "Using musiclist ./data/musiclist.txt"
     fi
 
     if [[ "${ENABLE_FFMPEG_LOG_FILE}" == "true" ]]; then
         ffmpeg_log_file="/data/ffmpeg.log"
-        log WARNING "FFmpeg debug logs will be written to a file ./data/ffmpeg.log"
+        log WAR "FFmpeg debug logs will be written to a file ./data/ffmpeg.log"
         # Overwrite the log file on start to prevent it from growing indefinitely across container restarts.
         > "${ffmpeg_log_file}"
     fi
 
     if [[ "${ENABLE_SCRIPT_LOG_FILE}" == "true" ]]; then
-        log WARNING "Script WARNING and ERROR logs will be written to ${script_log_file}"
+        log WAR "Script WARNING and ERROR logs will be written to ${script_log_file}"
         # Overwrite the log file on start to prevent it from growing indefinitely across container restarts.
         > "${script_log_file}"
     fi
