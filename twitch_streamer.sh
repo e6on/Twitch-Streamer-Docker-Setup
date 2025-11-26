@@ -1011,6 +1011,7 @@ watch_for_changes() {
 }
 
 main() {
+    log WAR "Starting Twitch Streamer Script..."
     # Trap EXIT, SIGINT (Ctrl+C), and SIGTERM (graceful kill).
     trap cleanup EXIT SIGINT SIGTERM
 
