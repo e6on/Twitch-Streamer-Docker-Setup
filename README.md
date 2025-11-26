@@ -17,6 +17,7 @@ A simple, efficient, and Docker-based solution for streaming a playlist of video
 -   **Optional Background Music:** Replace the original video audio with a separate, continuously looping playlist of your own music.
 
 You can use ready made Docker image from here https://hub.docker.com/r/e6on/twitch-streamer or make your own.
+Follow me on Twitch https://www.twitch.tv/egon_p.
 
 ## Prerequisites
 
