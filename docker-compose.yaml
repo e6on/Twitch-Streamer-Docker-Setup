@@ -62,7 +62,7 @@ services:
       # The main container log is always clean. Uncomment the line below to also save
       # the full, verbose FFmpeg debug output to a file at ./data/ffmpeg.log.
       # This is useful for troubleshooting but can create large log files.
-      # - ENABLE_FFMPEG_LOG_FILE=true
+      #- ENABLE_FFMPEG_LOG_FILE=true
       # --- Optional Script Event Logging ---
       # Uncomment to save WARNING and ERROR level script messages to a log file.
       # This is useful for reviewing issues without having to parse the main container log.

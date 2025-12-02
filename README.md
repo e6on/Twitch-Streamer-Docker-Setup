@@ -1,6 +1,6 @@
 # Twitch Streamer Docker Setup
 
-A simple, efficient, and Docker-based solution for streaming a playlist of video files 24/7 to Twitch using FFmpeg with Intel Quick Sync Video (QSV) hardware acceleration via VA-API (or a compatible AMD GPU). This setup is ideal for low-power systems like UGREEN NASync DXP4800 with an Intel N100 Quad-core CPU.
+A simple, efficient, and Docker-based solution for streaming a playlist of video files 24/7 to Twitch using FFmpeg with Intel Quick Sync Video (QSV) hardware acceleration via VA-API. This setup is ideal for low-power systems like UGREEN NASync DXP4800 with an Intel N100 Quad-core CPU.
 
 ## Features
 
@@ -17,7 +17,6 @@ A simple, efficient, and Docker-based solution for streaming a playlist of video
 -   **Optional Background Music:** Replace the original video audio with a separate, continuously looping playlist of your own music.
 
 You can use ready made Docker image from here https://hub.docker.com/r/e6on/twitch-streamer or make your own.
-Follow me on Twitch https://www.twitch.tv/egon_p.
 
 ## Prerequisites
 
@@ -26,14 +25,11 @@ Before you begin, ensure you have the following installed and configured on your
 -   Docker & Docker Compose
 -   Download [FFmpeg - ffmpeg-6.1.2-linux-amd64.tar.xz](https://github.com/AkashiSN/ffmpeg-docker/releases) pre-built binary files.
 -   A Twitch account and your **Stream Key**
--   **For Hardware Acceleration (Recommended):** A modern Intel CPU with Quick Sync Video support or a compatible AMD GPU.
--   **VA-API Drivers (for Intel or AMD):**
-    -   **For Intel GPUs:** Install `intel-media-driver` for modern GPUs (Broadwell+).
-        -   On Debian/Ubuntu: `sudo apt-get install intel-media-va-driver-non-free`
-        -   On Arch Linux: `sudo pacman -S intel-media-driver`
-    -   **For AMD GPUs:** Install the open-source Mesa VA-API drivers.
-        -   On Debian/Ubuntu: `sudo apt-get install mesa-va-drivers`
-        -   On Arch Linux: `sudo pacman -S libva-mesa-driver`
+-   **For Hardware Acceleration (Recommended):** A modern Intel CPU with Quick Sync Video support (or a compatible AMD GPU).
+-   **Intel VA-API Drivers:**
+    -   For modern GPUs (Broadwell and newer), install `intel-media-driver`.
+    -   On Debian/Ubuntu: `sudo apt-get install intel-media-va-driver-non-free`
+    -   On Arch Linux: `sudo pacman -S intel-media-driver`
 -   **Verification Tool (Optional but Recommended):**
     -   Install `vainfo` to check if VA-API is configured correctly.
     -   On Debian/Ubuntu: `sudo apt-get install vainfo`
@@ -266,7 +262,7 @@ In addition to the main container log, you can save important script events (war
 # - SCRIPT_LOG_FILE=/data/script_warnings_errors.log # Optional: customize log file path
 ```
 
-## Verifying Hardware Acceleration
+## Verifying Hardware Acceleration and test Stall Monitor
 
 To confirm that Intel QSV hardware acceleration is being used, check the container logs for FFmpeg's initialization output.
 
@@ -284,3 +280,23 @@ sudo intel_gpu_top
 ```
 
 You should see activity in the "Video" or "Render/3D" sections when the stream is active.
+
+## To test Stall Monitor
+
+Find the ffmpeg PID:
+
+```bash
+pidof ffmpeg
+```
+
+Trigger crash:
+
+```bash
+kill -9 $PID
+```
+
+Pause the ffmpeg process:
+
+```bash
+kill -STOP $PID
+```

@@ -113,12 +113,25 @@ cleanup() {
 # Check for required commands.
 check_dependencies() {
     log INF "Checking for required dependencies..."
-    for cmd in ffmpeg ffprobe inotifywait awk; do
+    for cmd in ffmpeg ffprobe inotifywait awk pgrep; do
         if ! command -v "$cmd" &> /dev/null; then
             log ERR "Required command '$cmd' is not installed. Please install it and try again."
             exit 1
         fi
     done
+
+    # For the writer-check on the progress pipe we prefer /proc-based inspection
+    # (fast and reliable on Linux containers), but if /proc is not available on
+    # the host, ensure at least one of fuser or lsof is present to be able to
+    # detect which process holds the progress pipe.
+    if [[ ! -d "/proc" ]]; then
+        if ! command -v fuser &>/dev/null && ! command -v lsof &>/dev/null; then
+            log ERR "This platform appears not to have /proc and neither fuser nor lsof are installed.\nPlease install 'fuser' or 'lsof' (or run in a Linux container with /proc) so the script can detect ffmpeg's progress-pipe writer."
+            exit 1
+        else
+            log WAR "Using fuser/lsof-based inspection for detecting ffmpeg writer on non-/proc platform."
+        fi
+    fi
 }
 
 # Check required environment variables.
@@ -542,6 +555,82 @@ kill_log_processor() {
     log_processor_pid=""
 }
 
+# Returns 0 if any ffmpeg process is running on the system.
+is_any_ffmpeg_running() {
+    # Use pgrep for a simple check. Works in Docker/Linux.
+    if pgrep -x ffmpeg >/dev/null 2>&1; then
+        return 0
+    fi
+    return 1
+}
+
+# Returns 0 if any running ffmpeg process has an open file descriptor pointing to
+# the provided progress pipe path. We prefer to check `/proc` for speed and
+# accuracy, but fall back to `fuser` or `lsof` if available.
+any_ffmpeg_has_fd_to_pipe() {
+    local pipe_path="$1"
+    if [[ -z "${pipe_path}" ]]; then
+        return 1
+    fi
+
+    # First, try /proc-based inspection (fast and reliable on Linux).
+    if [[ -d "/proc" ]]; then
+        # pgrep will give us all ffmpeg PIDs; check if any of them hold the pipe.
+        local pid
+        while read -r pid; do
+            # Skip empty lines
+            [[ -z "${pid}" ]] && continue
+            # Examine all file descriptors; readlink returns the target path.
+            for fd in /proc/${pid}/fd/*; do
+                # If the glob did not expand, the literal path will not exist, skip it.
+                [[ -e "${fd}" ]] || continue
+                local target
+                if ! target=$(readlink -f "${fd}" 2>/dev/null); then
+                    continue
+                fi
+                if [[ "${target}" == "${pipe_path}" ]]; then
+                    return 0
+                fi
+            done
+        done < <(pgrep -x ffmpeg || true)
+        return 1
+    fi
+
+    # If `/proc` not present (unlikely in Docker on Linux), try `fuser` if available.
+    if command -v fuser >/dev/null 2>&1; then
+        local holder_pids
+        holder_pids=$(fuser "${pipe_path}" 2>/dev/null || true)
+        if [[ -n "${holder_pids}" ]]; then
+            # Check whether any of these holders are ffmpeg.
+            for pid in ${holder_pids}; do
+                if ps -p "${pid}" -o comm= 2>/dev/null | grep -q "ffmpeg"; then
+                    return 0
+                fi
+            done
+        fi
+        return 1
+    fi
+
+    # As a last resort, try lsof (may not be installed in minimal containers).
+    if command -v lsof >/dev/null 2>&1; then
+        local lsof_pids
+        # -t to return only pids; -F0 to ensure parsing is not whitespace-ambiguous.
+        lsof_pids=$(lsof -t "${pipe_path}" 2>/dev/null || true)
+        if [[ -n "${lsof_pids}" ]]; then
+            for pid in ${lsof_pids}; do
+                if ps -p "${pid}" -o comm= 2>/dev/null | grep -q "ffmpeg"; then
+                    return 0
+                fi
+            done
+        fi
+        return 1
+    fi
+
+    # We cannot determine if ffmpeg holds the pipe; optimistically return failure
+    # so the caller treats it as not writing and triggers a soft restart.
+    return 1
+}
+
 # Shuffles the existing filtered playlist file in place.
 shuffle_existing_playlist() {
     local playlist_file="${filtered_video_file_list}"
@@ -782,9 +871,10 @@ start_streaming() {
 
     if [[ "${ENABLE_HW_ACCEL}" == "true" ]]; then
         log INF "Using Hardware Acceleration (VA-API)."
-        ffmpeg_opts+=(-hwaccel vaapi -vaapi_device /dev/dri/renderD128)
-        video_filter_chain="format=nv12,hwupload,scale_vaapi=w=${STREAM_RESOLUTION%x*}:h=${STREAM_RESOLUTION#*x}"
-        video_encoder_opts=(-c:v h264_vaapi)
+        ffmpeg_opts+=(-hwaccel vaapi -vaapi_device /dev/dri/renderD128 -hwaccel_output_format vaapi)
+        # The decoded frames are already in VA-API format on the GPU. We can scale them directly.
+        video_filter_chain="scale_vaapi=w=${STREAM_RESOLUTION%x*}:h=${STREAM_RESOLUTION#*x}:format=nv12"
+        video_encoder_opts=(-c:v h264_vaapi -profile:v high)
     else
         log INF "Using Software (CPU) Encoding with preset: ${CPU_PRESET}."
         # For CPU encoding, the filter chain is simpler and runs on the CPU.
@@ -854,18 +944,23 @@ start_streaming() {
 
 # Helper function for the monitor to reset its state after a restart.
 reset_monitor_state() {
-    stall_counter=0
-    # The timestamp file might not exist if the stream failed to start, so check for it.
-    [[ -f "${new_video_timestamp_file}" ]] && last_video_start_timestamp=$(stat -c %Y "${new_video_timestamp_file}") || last_video_start_timestamp=0
+    # We cannot modify the monitor's local variables from here, so instead return
+    # a timestamp that the caller can use to reset its local state.
+    local last_ts=0
+    if [[ -f "${new_video_timestamp_file}" ]]; then
+        last_ts=$(stat -c %Y "${new_video_timestamp_file}" 2>/dev/null || echo 0)
+    fi
+    echo "${last_ts}"
 }
 
 monitor_for_stall() {
     set +e  # Disable exit on error inside stall monitor loop
     local stall_counter=0
-    local last_video_start_timestamp=$(stat -c %Y "${new_video_timestamp_file}")
-    
+    local last_video_start_timestamp
+    last_video_start_timestamp=$(reset_monitor_state)
+    stall_counter=0
+
     log INF "Starting FFmpeg stall monitor. Reading from ${progress_pipe}"
-    reset_monitor_state # Set initial timestamp
     
     # We will loop continuously and read from the progress pipe.
     # `read -r -t` is used to implement a timeout.
@@ -899,25 +994,38 @@ monitor_for_stall() {
             # EOF on the pipe. This means ffmpeg has exited.
             log ERR "[Stall Monitor] Progress pipe closed (EOF). FFmpeg has likely exited. Restarting..."
             restart_stream "soft"
-            reset_monitor_state
+            last_video_start_timestamp=$(reset_monitor_state)
+            stall_counter=0
             continue # Continue the monitor loop
-        elif [[ $read_status -gt 128 ]]; then
-            # A timeout occurred, which is the primary indicator of a stall.
+        elif [[ $read_status -ne 0 ]]; then
+            # A timeout or unexpected read status occurred; treat as potential stall.
             log WAR "[Stall Monitor] No progress update received for ${STALL_MONITOR_INTERVAL}s. Checking FFmpeg status..."
-            if [[ -n "${ffmpeg_pid}" ]] && kill -0 "${ffmpeg_pid}" &>/dev/null; then
-                # The process is still alive but not making progress. This is a stall.
-                let "stall_counter+=1"
-                log WAR "[Stall Monitor] FFmpeg is still running but silent. Counter: ${stall_counter}/${STALL_THRESHOLD}."
-                if (( stall_counter >= STALL_THRESHOLD )); then
-                    log ERR "FFmpeg appears to be stalled (silent). Restarting stream..."
-                    restart_stream "hard" # No specific file to exclude, but still a hard restart.
-                    reset_monitor_state
+            if is_any_ffmpeg_running; then
+                if any_ffmpeg_has_fd_to_pipe "${progress_pipe}"; then
+                    # At least one ffmpeg process is running and holds the progress pipe, so
+                    # it is likely stalled (still running but not writing progress updates).
+                    let "stall_counter+=1"
+                    log WAR "[Stall Monitor] FFmpeg is still running but silent. Counter: ${stall_counter}/${STALL_THRESHOLD}."
+                    if (( stall_counter >= STALL_THRESHOLD )); then
+                        log ERR "FFmpeg appears to be stalled (silent). Restarting stream..."
+                        restart_stream "hard" # No specific file to exclude, but still a hard restart.
+                        last_video_start_timestamp=$(reset_monitor_state)
+                        stall_counter=0
+                    fi
+                else
+                    # There may be ffmpeg processes, but none are holding the progress pipe.
+                    # Treat this as a process death/misalignment and perform a soft restart.
+                    log ERR "[Stall Monitor] No ffmpeg writer attached to progress pipe. Attempting soft restart..."
+                    restart_stream "soft"
+                    last_video_start_timestamp=$(reset_monitor_state)
+                    stall_counter=0
                 fi
             else
-                # The process has died unexpectedly.
-                log ERR "[Stall Monitor] FFmpeg process is not running. Attempting to restart the stream..."
+                # No ffmpeg process is running at all; restart softly.
+                log ERR "[Stall Monitor] No ffmpeg process found. Attempting to restart the stream..."
                 restart_stream "soft" # Soft restart as the cause is unknown.
-                reset_monitor_state
+                last_video_start_timestamp=$(reset_monitor_state)
+                stall_counter=0
             fi
             continue # Skip the regular progress processing below.
         else
@@ -949,7 +1057,8 @@ monitor_for_stall() {
                     if (( stall_counter >= STALL_THRESHOLD )); then
                         log ERR "FFmpeg appears to be stalled (speed 0x). Restarting stream..."
                         restart_stream "hard" "${currently_playing_video_basename}"
-                        reset_monitor_state
+                        last_video_start_timestamp=$(reset_monitor_state)
+                        stall_counter=0
                     fi
                 fi
                 ;;
@@ -957,7 +1066,8 @@ monitor_for_stall() {
                 # FFmpeg finished cleanly (e.g., if stream_loop was not -1). Do a soft restart.
                 log WAR "[Stall Monitor] FFmpeg progress ended. Restarting stream..."
                 restart_stream "soft"
-                reset_monitor_state
+                last_video_start_timestamp=$(reset_monitor_state)
+                stall_counter=0
                 ;;
             # No other specific case needed for this implementation, as the timeout handles general stalls.
         esac
@@ -1001,12 +1111,11 @@ watch_for_changes() {
         done
 
         log WAR "Debounce timer finished. Final change was: ${last_event} on ${last_path}${last_file}. Restarting stream..."
-        kill_monitor # Explicitly kill the old monitor process
         # A "hard" restart handles killing ffmpeg/log_processor, rebuilding playlists, and starting the stream.
+        # The restart_stream function already kills the monitor process, so we don't need to do it here.
         restart_stream "hard"
-        currently_playing_video_basename=""
         monitor_for_stall & # Restart the monitor
-        monitor_pid=$! # Capture PID of the new monitor process
+        monitor_pid=$!     # Capture PID of the new monitor process
     done
 }
 
